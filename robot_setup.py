@@ -42,7 +42,7 @@ WHEEL_PRIMS = [f"{BASE}/Front_Left", f"{BASE}/Front_Right", f"{BASE}/Rear_Wheel"
 
 # Softer drives avoid overpowering the low-friction mud contact model.
 FRONT_WHEEL_DAMPING = 1500.0
-FRONT_WHEEL_MAX_FORCE = 120.0
+FRONT_WHEEL_MAX_FORCE = 300.0
 REAR_STEER_STIFFNESS = 2e4
 REAR_STEER_DAMPING = 800.0
 REAR_STEER_MAX_FORCE = 300.0

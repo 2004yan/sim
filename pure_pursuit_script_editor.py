@@ -61,6 +61,10 @@ MAX_STEER_RAD = math.radians(50.0)
 MAX_STEER_RATE_RAD_S = math.radians(60.0)
 ISAAC_REAR_STEER_SIGN = -1.0
 DEBUG_PERIOD_S = 0.5
+STALL_SPEED_MPS = 0.03
+STALL_CURVATURE = 0.5
+STALL_CRAWL_SPEED_MPS = 0.25
+STALL_MAX_STEER_RAD = math.radians(15.0)
 REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = DEFAULT_FIELD_WIDTH
 GROUND_SIZE = DEFAULT_GROUND_SIZE
@@ -163,6 +167,10 @@ def pure_pursuit_step(_step_size: float) -> None:
         theta=theta,
         v_mps=v_mps,
     )
+    stalling = (
+        pose_state["v_measured"] < STALL_SPEED_MPS
+        and abs(raw_command.curvature) > STALL_CURVATURE
+    )
     if abs(raw_command.curvature) < STRAIGHT_CURVATURE_DEADBAND:
         wheel_rad_s = (raw_command.left_rad_s + raw_command.right_rad_s) / 2.0
         raw_command = replace(
@@ -171,6 +179,14 @@ def pure_pursuit_step(_step_size: float) -> None:
             right_rad_s=wheel_rad_s,
             steer_rad=0.0,
             curvature=0.0,
+        )
+    elif stalling:
+        wheel_rad_s = STALL_CRAWL_SPEED_MPS / DEFAULT_WHEEL_RADIUS
+        raw_command = replace(
+            raw_command,
+            left_rad_s=wheel_rad_s,
+            right_rad_s=wheel_rad_s,
+            steer_rad=float(np.clip(raw_command.steer_rad, -STALL_MAX_STEER_RAD, STALL_MAX_STEER_RAD)),
         )
     command = limit_actuator_command(
         raw_command,
@@ -200,6 +216,7 @@ def pure_pursuit_step(_step_size: float) -> None:
             f"k={raw_command.curvature:.3f} "
             f"target_v={target_speed:.2f} cmd_v={speed_state['v_mps']:.2f} "
             f"meas_v={pose_state['v_measured']:.2f} "
+            f"stall={stalling} "
             f"L={command.left_rad_s:.2f} R={command.right_rad_s:.2f} "
             f"steer={math.degrees(command.steer_rad):.1f}deg "
             f"lookahead=({raw_command.lookahead_point[0]:.2f}, "
