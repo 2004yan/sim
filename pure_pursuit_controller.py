@@ -22,6 +22,7 @@ DEFAULT_FIELD_LENGTH = 30.0
 DEFAULT_FIELD_WIDTH = 3.0
 DEFAULT_SEMICIRCLE_COUNT = 9
 DEFAULT_MAIN_LANE_COUNT = 2
+DEFAULT_GROUND_SIZE = 20.0
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,12 @@ def yaw_from_quat(quat: Sequence[float]) -> float:
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def quat_from_yaw(theta: float) -> tuple[float, float, float, float]:
+    """Return an Isaac-style quaternion tuple ordered as (w, x, y, z)."""
+    half = theta / 2.0
+    return (float(math.cos(half)), 0.0, 0.0, float(math.sin(half)))
+
+
 def generate_lawnmower_path(
     *,
     field_length: float = DEFAULT_FIELD_LENGTH,
@@ -285,6 +292,102 @@ def transform_path_to_pose(
     return anchored
 
 
+def clamp_field_length_to_ground(
+    *,
+    x: float,
+    y: float,
+    theta: float,
+    requested_length: float,
+    turn_radius: float,
+    ground_size: float = DEFAULT_GROUND_SIZE,
+    margin: float = 1.0,
+    min_length: float = 2.0,
+) -> float:
+    """Clamp forward path length so the far turn stays inside a square ground plane."""
+    if requested_length <= 0:
+        raise ValueError("requested_length must be positive")
+    if turn_radius < 0:
+        raise ValueError("turn_radius must be non-negative")
+    if ground_size <= 0:
+        raise ValueError("ground_size must be positive")
+    if margin < 0:
+        raise ValueError("margin must be non-negative")
+    if min_length <= 0:
+        raise ValueError("min_length must be positive")
+
+    half = ground_size / 2.0
+    dx = math.cos(theta)
+    dy = math.sin(theta)
+    distances: list[float] = []
+    if dx > 1e-9:
+        distances.append((half - x) / dx)
+    elif dx < -1e-9:
+        distances.append((-half - x) / dx)
+    if dy > 1e-9:
+        distances.append((half - y) / dy)
+    elif dy < -1e-9:
+        distances.append((-half - y) / dy)
+
+    forward_to_edge = min((distance for distance in distances if distance > 0.0), default=requested_length)
+    usable_length = forward_to_edge - margin - turn_radius
+    return float(np.clip(usable_length, min_length, requested_length))
+
+
+def compute_platform_corner_start_pose(
+    *,
+    ground_size: float = DEFAULT_GROUND_SIZE,
+    field_width: float = DEFAULT_FIELD_WIDTH,
+    lane_count: int = DEFAULT_MAIN_LANE_COUNT,
+    track_width: float = DEFAULT_TRACK_WIDTH,
+    wheelbase: float = DEFAULT_WHEELBASE,
+    wheel_radius: float = DEFAULT_WHEEL_RADIUS,
+    margin: float = 1.0,
+    theta: float = 0.0,
+) -> tuple[float, float, float]:
+    """Choose an upper-left platform start pose with vehicle and turn clearance."""
+    if ground_size <= 0:
+        raise ValueError("ground_size must be positive")
+    if field_width <= 0:
+        raise ValueError("field_width must be positive")
+    if lane_count < 2:
+        raise ValueError("lane_count must be at least 2")
+    if track_width <= 0 or wheelbase <= 0 or wheel_radius <= 0:
+        raise ValueError("vehicle dimensions must be positive")
+    if margin < 0:
+        raise ValueError("margin must be non-negative")
+
+    half = ground_size / 2.0
+    lane_spacing = field_width / float(lane_count - 1)
+    turn_radius = lane_spacing / 2.0
+    vehicle_half_width = (track_width + 2.0 * wheel_radius) / 2.0
+    vehicle_half_length = (wheelbase + 2.0 * wheel_radius) / 2.0
+
+    x = -half + margin + max(vehicle_half_length, turn_radius)
+    y = half - margin - vehicle_half_width
+    return (float(x), float(y), float(theta))
+
+
+def speed_from_curvature(
+    curvature: float,
+    *,
+    cruise_speed: float = 1.2,
+    turn_speed: float = 0.25,
+    slowdown_curvature: float = 0.8,
+) -> float:
+    """Choose a target speed: fast on straight segments, slow in tight turns."""
+    if cruise_speed <= 0:
+        raise ValueError("cruise_speed must be positive")
+    if turn_speed <= 0:
+        raise ValueError("turn_speed must be positive")
+    if turn_speed > cruise_speed:
+        raise ValueError("turn_speed must not exceed cruise_speed")
+    if slowdown_curvature <= 0:
+        raise ValueError("slowdown_curvature must be positive")
+
+    ratio = min(abs(curvature) / slowdown_curvature, 1.0)
+    return float(cruise_speed - (cruise_speed - turn_speed) * ratio)
+
+
 def apply_command(bot, command: PurePursuitCommand) -> None:
     """Apply a computed command to PaddyRobotController-like objects."""
     bot.set_wheel_speeds(command.left_rad_s, command.right_rad_s)
@@ -301,6 +404,7 @@ def _append_unique(path: list[tuple[float, float]], point: tuple[float, float]) 
 
 __all__ = [
     "DEFAULT_FIELD_LENGTH",
+    "DEFAULT_GROUND_SIZE",
     "DEFAULT_MAIN_LANE_COUNT",
     "DEFAULT_STEER_SIGN",
     "DEFAULT_SEMICIRCLE_COUNT",
@@ -311,8 +415,12 @@ __all__ = [
     "PurePursuitCommand",
     "PurePursuitTracker",
     "apply_command",
+    "clamp_field_length_to_ground",
+    "compute_platform_corner_start_pose",
     "generate_main_lane_path",
     "generate_lawnmower_path",
+    "quat_from_yaw",
+    "speed_from_curvature",
     "transform_path_to_pose",
     "yaw_from_quat",
 ]
