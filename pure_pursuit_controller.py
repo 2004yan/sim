@@ -373,6 +373,7 @@ def speed_from_curvature(
     cruise_speed: float = 1.2,
     turn_speed: float = 0.25,
     slowdown_curvature: float = 0.8,
+    straight_curvature_deadband: float = 0.0,
 ) -> float:
     """Choose a target speed: fast on straight segments, slow in tight turns."""
     if cruise_speed <= 0:
@@ -383,8 +384,11 @@ def speed_from_curvature(
         raise ValueError("turn_speed must not exceed cruise_speed")
     if slowdown_curvature <= 0:
         raise ValueError("slowdown_curvature must be positive")
+    if straight_curvature_deadband < 0:
+        raise ValueError("straight_curvature_deadband must be non-negative")
 
-    ratio = min(abs(curvature) / slowdown_curvature, 1.0)
+    effective_curvature = max(abs(curvature) - straight_curvature_deadband, 0.0)
+    ratio = min(effective_curvature / slowdown_curvature, 1.0)
     return float(cruise_speed - (cruise_speed - turn_speed) * ratio)
 
 
@@ -392,6 +396,8 @@ def apply_command(bot, command: PurePursuitCommand) -> None:
     """Apply a computed command to PaddyRobotController-like objects."""
     bot.set_wheel_speeds(command.left_rad_s, command.right_rad_s)
     bot.set_steering_angle(command.steer_rad)
+    if hasattr(bot, "set_rear_wheel_speed"):
+        bot.set_rear_wheel_speed((command.left_rad_s + command.right_rad_s) / 2.0)
 
 
 def limit_actuator_command(

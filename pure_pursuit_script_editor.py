@@ -10,6 +10,7 @@ Run this file again to replace the previous Pure Pursuit callback.
 """
 
 import builtins
+from dataclasses import replace
 import math
 import sys
 
@@ -17,7 +18,8 @@ import numpy as np
 import omni.physx
 
 
-PROJECT_DIR = "/data2/file_swap/yzy_space/Sim_Robot_V2"
+# Keep this path fixed for Isaac Sim Script Editor imports.
+PROJECT_DIR = "/workspace/sim"
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
@@ -47,15 +49,17 @@ from pure_pursuit_controller import (
 
 SUBSCRIPTION_ATTR = "_pure_pursuit_physics_subscription"
 
-CRUISE_SPEED_MPS = 1.4
+CRUISE_SPEED_MPS = 1.8
 TURN_SPEED_MPS = 0.25
-SLOWDOWN_CURVATURE = 0.45
-ACCEL_LIMIT_MPS2 = 0.55
-DECEL_LIMIT_MPS2 = 1.2
-MAX_WHEEL_RAD_S = 8.0
-MAX_WHEEL_ACCEL_RAD_S2 = 10.0
-MAX_STEER_RAD = math.radians(28.0)
-MAX_STEER_RATE_RAD_S = math.radians(45.0)
+SLOWDOWN_CURVATURE = 0.35
+STRAIGHT_CURVATURE_DEADBAND = 0.08
+ACCEL_LIMIT_MPS2 = 1.2
+DECEL_LIMIT_MPS2 = 1.8
+MAX_WHEEL_RAD_S = 12.0
+MAX_WHEEL_ACCEL_RAD_S2 = 18.0
+MAX_STEER_RAD = math.radians(22.0)
+MAX_STEER_RATE_RAD_S = math.radians(70.0)
+ISAAC_REAR_STEER_SIGN = -1.0
 REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = DEFAULT_FIELD_WIDTH
 GROUND_SIZE = DEFAULT_GROUND_SIZE
@@ -119,9 +123,10 @@ tracker = PurePursuitTracker(
     lookahead_gain=1.0,
     min_lookahead=0.6,
     max_lookahead=1.5,
-    alpha=0.45,
+    alpha=0.75,
     max_steer=MAX_STEER_RAD,
     goal_tolerance=0.3,
+    steer_sign=ISAAC_REAR_STEER_SIGN,
 )
 speed_state = {"v_mps": TURN_SPEED_MPS}
 command_state = {
@@ -147,6 +152,15 @@ def pure_pursuit_step(_step_size: float) -> None:
         theta=theta,
         v_mps=v_mps,
     )
+    if abs(raw_command.curvature) < STRAIGHT_CURVATURE_DEADBAND:
+        wheel_rad_s = (raw_command.left_rad_s + raw_command.right_rad_s) / 2.0
+        raw_command = replace(
+            raw_command,
+            left_rad_s=wheel_rad_s,
+            right_rad_s=wheel_rad_s,
+            steer_rad=0.0,
+            curvature=0.0,
+        )
     command = limit_actuator_command(
         raw_command,
         command_state["command"],
@@ -163,6 +177,7 @@ def pure_pursuit_step(_step_size: float) -> None:
         cruise_speed=CRUISE_SPEED_MPS,
         turn_speed=TURN_SPEED_MPS,
         slowdown_curvature=SLOWDOWN_CURVATURE,
+        straight_curvature_deadband=STRAIGHT_CURVATURE_DEADBAND,
     )
     speed_state["v_mps"] = _advance_speed(v_mps, target_speed, step_size)
 
