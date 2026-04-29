@@ -9,7 +9,15 @@ Use this inside an already-open Isaac Sim session:
 Run this file again to replace the previous Pure Pursuit callback.
 """
 
-from isaacsim.core.api import World
+import builtins
+import sys
+
+import omni.physx
+
+
+PROJECT_DIR = "/workspace/sim"
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
 
 from controller import PaddyRobotController
 from pure_pursuit_controller import (
@@ -26,7 +34,7 @@ from pure_pursuit_controller import (
 )
 
 
-CALLBACK_NAME = "pure_pursuit_field_tracker"
+SUBSCRIPTION_ATTR = "_pure_pursuit_physics_subscription"
 
 V_MPS = 0.5
 FIELD_LENGTH = DEFAULT_FIELD_LENGTH
@@ -40,19 +48,11 @@ WAYPOINTS = generate_lawnmower_path(
 )
 
 
-def _get_world() -> World:
-    world = World.instance()
-    if world is None:
-        world = World(stage_units_in_meters=1.0)
-    return world
-
-
-world = _get_world()
-
-try:
-    world.remove_physics_callback(CALLBACK_NAME)
-except Exception:
-    pass
+def _clear_existing_subscription() -> None:
+    subscription = getattr(builtins, SUBSCRIPTION_ATTR, None)
+    if subscription is not None and hasattr(subscription, "unsubscribe"):
+        subscription.unsubscribe()
+    setattr(builtins, SUBSCRIPTION_ATTR, None)
 
 bot = PaddyRobotController()
 tracker = PurePursuitTracker(
@@ -82,13 +82,16 @@ def pure_pursuit_step(_step_size: float) -> None:
     if command.done:
         bot.set_steering_angle(0.0)
         bot.stop()
-        world.remove_physics_callback(CALLBACK_NAME)
-        print("[pure_pursuit] reached goal, callback removed")
+        _clear_existing_subscription()
+        print("[pure_pursuit] reached goal, subscription removed")
 
 
-world.add_physics_callback(CALLBACK_NAME, pure_pursuit_step)
+_clear_existing_subscription()
+physx_interface = omni.physx.get_physx_interface()
+subscription = physx_interface.subscribe_physics_step_events(pure_pursuit_step)
+setattr(builtins, SUBSCRIPTION_ATTR, subscription)
 print(
-    "[pure_pursuit] callback installed: "
+    "[pure_pursuit] PhysX subscription installed: "
     f"{len(WAYPOINTS)} path points, field={FIELD_LENGTH}m x {FIELD_WIDTH}m, "
     f"semicircles={SEMICIRCLE_COUNT}, speed={V_MPS}m/s"
 )
