@@ -21,6 +21,7 @@ DEFAULT_STEER_SIGN = 1.0
 DEFAULT_FIELD_LENGTH = 30.0
 DEFAULT_FIELD_WIDTH = 3.0
 DEFAULT_SEMICIRCLE_COUNT = 9
+DEFAULT_MAIN_LANE_COUNT = 2
 
 
 @dataclass(frozen=True)
@@ -88,11 +89,13 @@ class PurePursuitTracker:
             raise ValueError("path segments must have non-zero length")
         self._cum_lengths = np.concatenate(([0.0], np.cumsum(self._segment_lengths)))
         self.total_length = float(self._cum_lengths[-1])
+        self._last_progress = 0.0
 
     def compute(self, x: float, y: float, theta: float, v_mps: float) -> PurePursuitCommand:
         position = np.array([float(x), float(y)], dtype=float)
         goal = self.path[-1]
-        closest_progress = self._closest_progress(position)
+        closest_progress = max(self._closest_progress(position), self._last_progress)
+        self._last_progress = closest_progress
 
         reached_goal_position = np.linalg.norm(position - goal) <= self.goal_tolerance
         reached_goal_progress = (self.total_length - closest_progress) <= self.goal_tolerance
@@ -217,6 +220,71 @@ def generate_lawnmower_path(
     return path
 
 
+def generate_main_lane_path(
+    *,
+    field_length: float = DEFAULT_FIELD_LENGTH,
+    field_width: float = DEFAULT_FIELD_WIDTH,
+    lane_count: int = DEFAULT_MAIN_LANE_COUNT,
+    turn_samples: int = 25,
+) -> list[tuple[float, float]]:
+    """Generate a feasible demo path with 2 or 3 main vehicle-center lanes."""
+    if field_length <= 0:
+        raise ValueError("field_length must be positive")
+    if field_width <= 0:
+        raise ValueError("field_width must be positive")
+    if lane_count < 2:
+        raise ValueError("lane_count must be at least 2")
+    if turn_samples < 2:
+        raise ValueError("turn_samples must be at least 2")
+
+    lane_spacing = field_width / float(lane_count - 1)
+    turn_radius = lane_spacing / 2.0
+    path: list[tuple[float, float]] = [(0.0, float(field_width))]
+
+    for turn_index in range(lane_count - 1):
+        y_top = field_width - turn_index * lane_spacing
+        y_bottom = y_top - lane_spacing
+        going_right = turn_index % 2 == 0
+        straight_end_x = field_length if going_right else 0.0
+        side_sign = 1.0 if going_right else -1.0
+        center_y = y_top - turn_radius
+
+        _append_unique(path, (straight_end_x, y_top))
+        for angle in np.linspace(math.pi / 2.0, -math.pi / 2.0, turn_samples):
+            x = straight_end_x + side_sign * turn_radius * math.cos(float(angle))
+            y = center_y + turn_radius * math.sin(float(angle))
+            _append_unique(path, (x, y))
+        _append_unique(path, (straight_end_x, y_bottom))
+
+    final_x = field_length if lane_count % 2 == 1 else 0.0
+    _append_unique(path, (final_x, 0.0))
+    return path
+
+
+def transform_path_to_pose(
+    path: Iterable[Sequence[float]],
+    *,
+    x: float,
+    y: float,
+    theta: float,
+) -> list[tuple[float, float]]:
+    """Move a local path so its first point starts at the robot pose."""
+    points = np.asarray(path, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
+        raise ValueError("path must contain at least two 2D points")
+
+    local_start = points[0].copy()
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    anchored: list[tuple[float, float]] = []
+    for point in points:
+        dx, dy = point - local_start
+        world_x = x + cos_t * dx - sin_t * dy
+        world_y = y + sin_t * dx + cos_t * dy
+        anchored.append((float(world_x), float(world_y)))
+    return anchored
+
+
 def apply_command(bot, command: PurePursuitCommand) -> None:
     """Apply a computed command to PaddyRobotController-like objects."""
     bot.set_wheel_speeds(command.left_rad_s, command.right_rad_s)
@@ -233,6 +301,7 @@ def _append_unique(path: list[tuple[float, float]], point: tuple[float, float]) 
 
 __all__ = [
     "DEFAULT_FIELD_LENGTH",
+    "DEFAULT_MAIN_LANE_COUNT",
     "DEFAULT_STEER_SIGN",
     "DEFAULT_SEMICIRCLE_COUNT",
     "DEFAULT_FIELD_WIDTH",
@@ -242,6 +311,8 @@ __all__ = [
     "PurePursuitCommand",
     "PurePursuitTracker",
     "apply_command",
+    "generate_main_lane_path",
     "generate_lawnmower_path",
+    "transform_path_to_pose",
     "yaw_from_quat",
 ]
