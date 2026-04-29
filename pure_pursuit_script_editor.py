@@ -23,13 +23,16 @@ from controller import PaddyRobotController
 from pure_pursuit_controller import (
     DEFAULT_FIELD_LENGTH,
     DEFAULT_FIELD_WIDTH,
+    DEFAULT_MAIN_LANE_COUNT,
     DEFAULT_SEMICIRCLE_COUNT,
     DEFAULT_TRACK_WIDTH,
     DEFAULT_WHEEL_RADIUS,
     DEFAULT_WHEELBASE,
     PurePursuitTracker,
     apply_command,
+    generate_main_lane_path,
     generate_lawnmower_path,
+    transform_path_to_pose,
     yaw_from_quat,
 )
 
@@ -40,11 +43,14 @@ V_MPS = 0.5
 FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = DEFAULT_FIELD_WIDTH
 SEMICIRCLE_COUNT = DEFAULT_SEMICIRCLE_COUNT
+MAIN_LANE_COUNT = DEFAULT_MAIN_LANE_COUNT
 
-WAYPOINTS = generate_lawnmower_path(
+# Use the feasible demo path by default. Set MAIN_LANE_COUNT to 2 for a wider
+# single U-turn, or 3 for a compact three-pass field demonstration.
+LOCAL_WAYPOINTS = generate_main_lane_path(
     field_length=FIELD_LENGTH,
     field_width=FIELD_WIDTH,
-    semicircle_count=SEMICIRCLE_COUNT,
+    lane_count=MAIN_LANE_COUNT,
 )
 
 
@@ -55,14 +61,22 @@ def _clear_existing_subscription() -> None:
     setattr(builtins, SUBSCRIPTION_ATTR, None)
 
 bot = PaddyRobotController()
+start_pos, start_quat = bot.robot.get_world_pose()
+start_theta = yaw_from_quat(start_quat)
+WAYPOINTS = transform_path_to_pose(
+    LOCAL_WAYPOINTS,
+    x=float(start_pos[0]),
+    y=float(start_pos[1]),
+    theta=start_theta,
+)
 tracker = PurePursuitTracker(
     WAYPOINTS,
     wheelbase=DEFAULT_WHEELBASE,
     track_width=DEFAULT_TRACK_WIDTH,
     wheel_radius=DEFAULT_WHEEL_RADIUS,
     lookahead_gain=1.0,
-    min_lookahead=0.25,
-    max_lookahead=0.8,
+    min_lookahead=0.6,
+    max_lookahead=1.5,
     alpha=0.7,
     goal_tolerance=0.3,
 )
@@ -92,6 +106,8 @@ subscription = physx_interface.subscribe_physics_step_events(pure_pursuit_step)
 setattr(builtins, SUBSCRIPTION_ATTR, subscription)
 print(
     "[pure_pursuit] PhysX subscription installed: "
-    f"{len(WAYPOINTS)} path points, field={FIELD_LENGTH}m x {FIELD_WIDTH}m, "
-    f"semicircles={SEMICIRCLE_COUNT}, speed={V_MPS}m/s"
+    f"{len(WAYPOINTS)} path points, start=({float(start_pos[0]):.2f}, "
+    f"{float(start_pos[1]):.2f}), heading={start_theta:.2f}rad, "
+    f"field={FIELD_LENGTH}m x {FIELD_WIDTH}m, main_lanes={MAIN_LANE_COUNT}, "
+    f"speed={V_MPS}m/s"
 )
