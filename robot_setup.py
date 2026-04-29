@@ -7,7 +7,7 @@ Configures /Sim_Robot_V2:
     - removes the world-to-base root_joint (URDF import adds a FixedJoint
       that pins the robot to the world - wheels spin but robot can't move)
     - masses on base + wheels + rear link
-    - angular drives (position control on rear link, velocity control on wheels)
+    - angular drives (position control on rear link, velocity control on front wheels)
     - rear link joint limits + removes blocking JointStateAPI
     - rubber wheel physics materials
     - disables articulation fixed base (so gravity acts)
@@ -136,11 +136,30 @@ def _set_drive(path, stiffness, damping, max_force=1e8):
     print(f"[robot] {path.split('/')[-1]} drive: {mode} (k={stiffness}, b={damping})")
 
 
+def _disable_drive(path):
+    """Disable a joint drive so a passive wheel can roll from contact physics."""
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        print(f"[robot] drive disable skipped - missing {path}")
+        return
+    UsdPhysics.DriveAPI.Apply(prim, "angular")
+    for attr, val in (
+        ("drive:angular:physics:stiffness", 0.0),
+        ("drive:angular:physics:damping", 0.0),
+        ("drive:angular:physics:maxForce", 0.0),
+    ):
+        a = prim.GetAttribute(attr)
+        if not a.IsValid():
+            a = prim.CreateAttribute(attr, Sdf.ValueTypeNames.Float)
+        a.Set(val)
+    print(f"[robot] {path.split('/')[-1]} drive disabled (passive)")
+
+
 def set_drives():
     _set_drive(REAR_LINK_JOINT,  stiffness=1e6, damping=1e4)   # rear steering
     _set_drive(FRONT_L_JOINT,    stiffness=0,   damping=1e4)   # left front wheel
     _set_drive(FRONT_R_JOINT,    stiffness=0,   damping=1e4)   # right front wheel
-    _set_drive(REAR_WHEEL_JOINT, stiffness=0,   damping=1e4)   # rear free wheel
+    _disable_drive(REAR_WHEEL_JOINT)                            # rear free wheel
 
 
 # ─── 4. Wheel friction materials ──────────────────────────────────────────────

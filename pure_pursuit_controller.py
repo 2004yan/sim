@@ -396,8 +396,6 @@ def apply_command(bot, command: PurePursuitCommand) -> None:
     """Apply a computed command to PaddyRobotController-like objects."""
     bot.set_wheel_speeds(command.left_rad_s, command.right_rad_s)
     bot.set_steering_angle(command.steer_rad)
-    if hasattr(bot, "set_rear_wheel_speed"):
-        bot.set_rear_wheel_speed((command.left_rad_s + command.right_rad_s) / 2.0)
 
 
 def limit_actuator_command(
