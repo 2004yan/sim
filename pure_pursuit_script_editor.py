@@ -10,6 +10,7 @@ Run this file again to replace the previous Pure Pursuit callback.
 """
 
 import builtins
+import math
 import sys
 
 import numpy as np
@@ -36,6 +37,7 @@ from pure_pursuit_controller import (
     compute_platform_corner_start_pose,
     generate_main_lane_path,
     generate_lawnmower_path,
+    limit_actuator_command,
     quat_from_yaw,
     speed_from_curvature,
     transform_path_to_pose,
@@ -45,10 +47,15 @@ from pure_pursuit_controller import (
 
 SUBSCRIPTION_ATTR = "_pure_pursuit_physics_subscription"
 
-CRUISE_SPEED_MPS = 1.0
+CRUISE_SPEED_MPS = 1.4
 TURN_SPEED_MPS = 0.25
-ACCEL_LIMIT_MPS2 = 0.35
-DECEL_LIMIT_MPS2 = 0.8
+SLOWDOWN_CURVATURE = 0.45
+ACCEL_LIMIT_MPS2 = 0.55
+DECEL_LIMIT_MPS2 = 1.2
+MAX_WHEEL_RAD_S = 8.0
+MAX_WHEEL_ACCEL_RAD_S2 = 10.0
+MAX_STEER_RAD = math.radians(28.0)
+MAX_STEER_RATE_RAD_S = math.radians(45.0)
 REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = DEFAULT_FIELD_WIDTH
 GROUND_SIZE = DEFAULT_GROUND_SIZE
@@ -112,10 +119,14 @@ tracker = PurePursuitTracker(
     lookahead_gain=1.0,
     min_lookahead=0.6,
     max_lookahead=1.5,
-    alpha=0.7,
+    alpha=0.45,
+    max_steer=MAX_STEER_RAD,
     goal_tolerance=0.3,
 )
 speed_state = {"v_mps": TURN_SPEED_MPS}
+command_state = {
+    "command": tracker.compute(x=start_x, y=start_y, theta=start_theta, v_mps=0.0),
+}
 
 
 def _advance_speed(current_speed: float, target_speed: float, step_size: float) -> float:
@@ -126,22 +137,34 @@ def _advance_speed(current_speed: float, target_speed: float, step_size: float) 
 
 
 def pure_pursuit_step(_step_size: float) -> None:
+    step_size = max(float(_step_size), 1.0 / 60.0)
     pos, quat = bot.robot.get_world_pose()
     theta = yaw_from_quat(quat)
     v_mps = speed_state["v_mps"]
-    command = tracker.compute(
+    raw_command = tracker.compute(
         x=float(pos[0]),
         y=float(pos[1]),
         theta=theta,
         v_mps=v_mps,
     )
+    command = limit_actuator_command(
+        raw_command,
+        command_state["command"],
+        step_size=step_size,
+        max_wheel_rad_s=MAX_WHEEL_RAD_S,
+        max_wheel_accel_rad_s2=MAX_WHEEL_ACCEL_RAD_S2,
+        max_steer_rad=MAX_STEER_RAD,
+        max_steer_rate_rad_s=MAX_STEER_RATE_RAD_S,
+    )
+    command_state["command"] = command
     apply_command(bot, command)
     target_speed = speed_from_curvature(
-        command.curvature,
+        raw_command.curvature,
         cruise_speed=CRUISE_SPEED_MPS,
         turn_speed=TURN_SPEED_MPS,
+        slowdown_curvature=SLOWDOWN_CURVATURE,
     )
-    speed_state["v_mps"] = _advance_speed(v_mps, target_speed, _step_size)
+    speed_state["v_mps"] = _advance_speed(v_mps, target_speed, step_size)
 
     if command.done:
         bot.set_steering_angle(0.0)

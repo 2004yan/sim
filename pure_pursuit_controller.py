@@ -394,6 +394,56 @@ def apply_command(bot, command: PurePursuitCommand) -> None:
     bot.set_steering_angle(command.steer_rad)
 
 
+def limit_actuator_command(
+    command: PurePursuitCommand,
+    previous: PurePursuitCommand,
+    *,
+    step_size: float,
+    max_wheel_rad_s: float,
+    max_wheel_accel_rad_s2: float,
+    max_steer_rad: float,
+    max_steer_rate_rad_s: float,
+) -> PurePursuitCommand:
+    """Clamp wheel and steering commands like Isaac wheeled controllers do."""
+    if step_size <= 0:
+        raise ValueError("step_size must be positive")
+    if max_wheel_rad_s <= 0 or max_wheel_accel_rad_s2 <= 0:
+        raise ValueError("wheel limits must be positive")
+    if max_steer_rad <= 0 or max_steer_rate_rad_s <= 0:
+        raise ValueError("steering limits must be positive")
+
+    left = _rate_limit(
+        current=previous.left_rad_s,
+        target=float(np.clip(command.left_rad_s, -max_wheel_rad_s, max_wheel_rad_s)),
+        max_delta=max_wheel_accel_rad_s2 * step_size,
+    )
+    right = _rate_limit(
+        current=previous.right_rad_s,
+        target=float(np.clip(command.right_rad_s, -max_wheel_rad_s, max_wheel_rad_s)),
+        max_delta=max_wheel_accel_rad_s2 * step_size,
+    )
+    steer = _rate_limit(
+        current=previous.steer_rad,
+        target=float(np.clip(command.steer_rad, -max_steer_rad, max_steer_rad)),
+        max_delta=max_steer_rate_rad_s * step_size,
+    )
+
+    return PurePursuitCommand(
+        left_rad_s=left,
+        right_rad_s=right,
+        steer_rad=steer,
+        done=command.done,
+        lookahead_point=command.lookahead_point,
+        curvature=command.curvature,
+        closest_progress=command.closest_progress,
+    )
+
+
+def _rate_limit(*, current: float, target: float, max_delta: float) -> float:
+    delta = target - current
+    return float(current + np.clip(delta, -max_delta, max_delta))
+
+
 def _append_unique(path: list[tuple[float, float]], point: tuple[float, float]) -> None:
     if path and math.isclose(path[-1][0], point[0], abs_tol=1e-9) and math.isclose(
         path[-1][1], point[1], abs_tol=1e-9
@@ -419,6 +469,7 @@ __all__ = [
     "compute_platform_corner_start_pose",
     "generate_main_lane_path",
     "generate_lawnmower_path",
+    "limit_actuator_command",
     "quat_from_yaw",
     "speed_from_curvature",
     "transform_path_to_pose",
