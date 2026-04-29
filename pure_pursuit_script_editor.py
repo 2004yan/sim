@@ -49,17 +49,18 @@ from pure_pursuit_controller import (
 
 SUBSCRIPTION_ATTR = "_pure_pursuit_physics_subscription"
 
-CRUISE_SPEED_MPS = 1.8
-TURN_SPEED_MPS = 0.25
-SLOWDOWN_CURVATURE = 0.35
-STRAIGHT_CURVATURE_DEADBAND = 0.08
-ACCEL_LIMIT_MPS2 = 1.2
-DECEL_LIMIT_MPS2 = 1.8
+CRUISE_SPEED_MPS = 0.9
+TURN_SPEED_MPS = 0.15
+SLOWDOWN_CURVATURE = 0.12
+STRAIGHT_CURVATURE_DEADBAND = 0.03
+ACCEL_LIMIT_MPS2 = 0.6
+DECEL_LIMIT_MPS2 = 0.6
 MAX_WHEEL_RAD_S = 12.0
-MAX_WHEEL_ACCEL_RAD_S2 = 18.0
-MAX_STEER_RAD = math.radians(22.0)
-MAX_STEER_RATE_RAD_S = math.radians(70.0)
+MAX_WHEEL_ACCEL_RAD_S2 = 8.0
+MAX_STEER_RAD = math.radians(50.0)
+MAX_STEER_RATE_RAD_S = math.radians(60.0)
 ISAAC_REAR_STEER_SIGN = -1.0
+DEBUG_PERIOD_S = 0.5
 REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = DEFAULT_FIELD_WIDTH
 GROUND_SIZE = DEFAULT_GROUND_SIZE
@@ -123,7 +124,7 @@ tracker = PurePursuitTracker(
     lookahead_gain=1.0,
     min_lookahead=0.6,
     max_lookahead=1.5,
-    alpha=0.75,
+    alpha=0.0,
     max_steer=MAX_STEER_RAD,
     goal_tolerance=0.3,
     steer_sign=ISAAC_REAR_STEER_SIGN,
@@ -131,6 +132,11 @@ tracker = PurePursuitTracker(
 speed_state = {"v_mps": TURN_SPEED_MPS}
 command_state = {
     "command": tracker.compute(x=start_x, y=start_y, theta=start_theta, v_mps=0.0),
+}
+debug_state = {"elapsed_s": 0.0}
+pose_state = {
+    "last_xy": np.array([start_x, start_y], dtype=float),
+    "v_measured": 0.0,
 }
 
 
@@ -145,7 +151,12 @@ def pure_pursuit_step(_step_size: float) -> None:
     step_size = max(float(_step_size), 1.0 / 60.0)
     pos, quat = bot.robot.get_world_pose()
     theta = yaw_from_quat(quat)
-    v_mps = speed_state["v_mps"]
+    xy = np.array([float(pos[0]), float(pos[1])], dtype=float)
+    instant_v = float(np.linalg.norm(xy - pose_state["last_xy"]) / step_size)
+    pose_state["last_xy"] = xy
+    pose_state["v_measured"] = 0.8 * pose_state["v_measured"] + 0.2 * instant_v
+    desired_v = speed_state["v_mps"]
+    v_mps = min(desired_v, max(pose_state["v_measured"] + 0.25, TURN_SPEED_MPS))
     raw_command = tracker.compute(
         x=float(pos[0]),
         y=float(pos[1]),
@@ -179,7 +190,21 @@ def pure_pursuit_step(_step_size: float) -> None:
         slowdown_curvature=SLOWDOWN_CURVATURE,
         straight_curvature_deadband=STRAIGHT_CURVATURE_DEADBAND,
     )
-    speed_state["v_mps"] = _advance_speed(v_mps, target_speed, step_size)
+    speed_state["v_mps"] = _advance_speed(speed_state["v_mps"], target_speed, step_size)
+    debug_state["elapsed_s"] += step_size
+    if debug_state["elapsed_s"] >= DEBUG_PERIOD_S:
+        debug_state["elapsed_s"] = 0.0
+        print(
+            "[pure_pursuit] "
+            f"progress={raw_command.closest_progress:.2f}/{tracker.total_length:.2f}m "
+            f"k={raw_command.curvature:.3f} "
+            f"target_v={target_speed:.2f} cmd_v={speed_state['v_mps']:.2f} "
+            f"meas_v={pose_state['v_measured']:.2f} "
+            f"L={command.left_rad_s:.2f} R={command.right_rad_s:.2f} "
+            f"steer={math.degrees(command.steer_rad):.1f}deg "
+            f"lookahead=({raw_command.lookahead_point[0]:.2f}, "
+            f"{raw_command.lookahead_point[1]:.2f})"
+        )
 
     if command.done:
         bot.set_steering_angle(0.0)

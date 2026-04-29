@@ -3,7 +3,7 @@ ground_setup.py - Paddy field ground plane with muddy physics + wet-mud visual.
 
 Run once in Isaac Sim's Script Editor before pressing Play.
 Creates /World/GroundPlane with:
-    - soft/sticky mud physics material (slippery, compliant contact)
+    - validation mud physics material (moderate grip, compliant contact)
     - OmniPBR visual material (dark olive wet soil)
     - PhysX contact offsets so wheels "sink" slightly
 
@@ -42,8 +42,8 @@ def create_ground_plane():
 def create_physics_material():
     PhysicsMaterial(
         prim_path=PHYS_MAT_PATH,
-        static_friction=0.35,    # wet mud - easy to break traction
-        dynamic_friction=0.25,   # very slippery once wheels spin
+        static_friction=0.6,     # validation grip; lower after steering is stable
+        dynamic_friction=0.45,   # keep dynamic friction above hard-turn demand
         restitution=0.0,         # zero bounce - mud absorbs impact
     )
     # PhysX compliant contact: low stiffness + damping = soft mushy surface

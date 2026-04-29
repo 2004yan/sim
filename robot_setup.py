@@ -30,7 +30,7 @@ REAR_WHEEL_JOINT = f"{JOINTS}/Rear_Wheel_Joint"
 
 MASS_CONFIG = {
     BASE_LINK:            350.0,
-    f"{BASE}/Rear_Link":   10.0,
+    f"{BASE}/Rear_Link_Link": 10.0,
     f"{BASE}/Rear_Wheel":   5.0,
     f"{BASE}/Front_Left":   5.0,
     f"{BASE}/Front_Right":  5.0,
@@ -39,6 +39,13 @@ MASS_CONFIG = {
 # (μs static, μd dynamic) — rubber tyre grips initially, drags through mud
 WHEEL_FRICTION = (0.8, 0.7)
 WHEEL_PRIMS = [f"{BASE}/Front_Left", f"{BASE}/Front_Right", f"{BASE}/Rear_Wheel"]
+
+# Softer drives avoid overpowering the low-friction mud contact model.
+FRONT_WHEEL_DAMPING = 1500.0
+FRONT_WHEEL_MAX_FORCE = 120.0
+REAR_STEER_STIFFNESS = 2e4
+REAR_STEER_DAMPING = 800.0
+REAR_STEER_MAX_FORCE = 300.0
 
 # Rear link steering angle limits (degrees)
 REAR_LINK_LIMIT_DEG = (-90.0, 90.0)
@@ -156,10 +163,25 @@ def _disable_drive(path):
 
 
 def set_drives():
-    _set_drive(REAR_LINK_JOINT,  stiffness=1e6, damping=1e4)   # rear steering
-    _set_drive(FRONT_L_JOINT,    stiffness=0,   damping=1e4)   # left front wheel
-    _set_drive(FRONT_R_JOINT,    stiffness=0,   damping=1e4)   # right front wheel
-    _disable_drive(REAR_WHEEL_JOINT)                            # rear free wheel
+    _set_drive(
+        REAR_LINK_JOINT,
+        stiffness=REAR_STEER_STIFFNESS,
+        damping=REAR_STEER_DAMPING,
+        max_force=REAR_STEER_MAX_FORCE,
+    )
+    _set_drive(
+        FRONT_L_JOINT,
+        stiffness=0,
+        damping=FRONT_WHEEL_DAMPING,
+        max_force=FRONT_WHEEL_MAX_FORCE,
+    )
+    _set_drive(
+        FRONT_R_JOINT,
+        stiffness=0,
+        damping=FRONT_WHEEL_DAMPING,
+        max_force=FRONT_WHEEL_MAX_FORCE,
+    )
+    _disable_drive(REAR_WHEEL_JOINT)  # rear free wheel
 
 
 # ─── 4. Wheel friction materials ──────────────────────────────────────────────

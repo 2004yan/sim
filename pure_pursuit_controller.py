@@ -124,10 +124,13 @@ class PurePursuitTracker:
         y_body = -sin_t * dx + cos_t * dy
         curvature = 2.0 * y_body / (lookahead * lookahead)
 
-        omega_diff = self.alpha * curvature * speed
-        left_mps = speed - omega_diff * self.track_width / 2.0
-        right_mps = speed + omega_diff * self.track_width / 2.0
-        steer = self.steer_sign * math.atan((1.0 - self.alpha) * curvature * self.wheelbase)
+        # Apply the full Pure Pursuit curvature to both the front wheel speed
+        # split and rear steering geometry. Splitting curvature between them
+        # under-steers the passive rear wheel and makes tight turns scrub.
+        omega = curvature * speed
+        left_mps = speed - omega * self.track_width / 2.0
+        right_mps = speed + omega * self.track_width / 2.0
+        steer = self.steer_sign * math.atan(curvature * self.wheelbase)
         steer = float(np.clip(steer, -self.max_steer, self.max_steer))
 
         return PurePursuitCommand(
