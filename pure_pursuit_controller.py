@@ -51,6 +51,7 @@ class PurePursuitTracker:
         max_steer: float = math.pi / 2.0,
         goal_tolerance: float = 0.2,
         steer_sign: float = DEFAULT_STEER_SIGN,
+        allow_reverse_wheels: bool = False,
     ) -> None:
         self.path = np.asarray(path, dtype=float)
         if self.path.ndim != 2 or self.path.shape[1] != 2 or len(self.path) < 2:
@@ -83,6 +84,7 @@ class PurePursuitTracker:
         self.max_steer = float(max_steer)
         self.goal_tolerance = float(goal_tolerance)
         self.steer_sign = float(steer_sign)
+        self.allow_reverse_wheels = bool(allow_reverse_wheels)
 
         self._segments = self.path[1:] - self.path[:-1]
         self._segment_lengths = np.linalg.norm(self._segments, axis=1)
@@ -121,15 +123,21 @@ class PurePursuitTracker:
         dx, dy = lookahead_point - position
         cos_t = math.cos(theta)
         sin_t = math.sin(theta)
+        x_body = cos_t * dx + sin_t * dy
         y_body = -sin_t * dx + cos_t * dy
-        curvature = 2.0 * y_body / (lookahead * lookahead)
+        dist_sq = x_body * x_body + y_body * y_body
+        curvature = 0.0 if dist_sq <= 1e-9 else 2.0 * y_body / dist_sq
+        max_curvature = math.tan(self.max_steer) / self.wheelbase
+        curvature = float(np.clip(curvature, -max_curvature, max_curvature))
 
-        # Apply the full Pure Pursuit curvature to both the front wheel speed
-        # split and rear steering geometry. Splitting curvature between them
-        # under-steers the passive rear wheel and makes tight turns scrub.
-        omega = curvature * speed
-        left_mps = speed - omega * self.track_width / 2.0
-        right_mps = speed + omega * self.track_width / 2.0
+        # The robot is a rear-steering tricycle: front differential is only a
+        # mild assist, never the primary turning mechanism in tight turns.
+        omega_diff = self.alpha * curvature * speed
+        left_mps = speed - omega_diff * self.track_width / 2.0
+        right_mps = speed + omega_diff * self.track_width / 2.0
+        if not self.allow_reverse_wheels and speed >= 0.0:
+            left_mps = max(left_mps, 0.0)
+            right_mps = max(right_mps, 0.0)
         steer = self.steer_sign * math.atan(curvature * self.wheelbase)
         steer = float(np.clip(steer, -self.max_steer, self.max_steer))
 
