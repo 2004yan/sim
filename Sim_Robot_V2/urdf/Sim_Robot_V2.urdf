@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="Sim_Robot_V2">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.031015 -0.0039718 -0.31519"
+        rpy="0 0 0" />
+      <mass
+        value="350" />
+      <inertia
+        ixx="123.38"
+        ixy="0.36607"
+        ixz="3.3164"
+        iyy="44.362"
+        iyz="-0.33469"
+        izz="147.18" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="Front_Left_Link">
+    <inertial>
+      <origin
+        xyz="-5.7704E-05 0.0039655 0.00020942"
+        rpy="0 0 0" />
+      <mass
+        value="5" />
+      <inertia
+        ixx="0.069062"
+        ixy="6.5825E-08"
+        ixz="-1.7849E-06"
+        iyy="0.13715"
+        iyz="-2.2613E-07"
+        izz="0.069062" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Front_Left_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.10588 0.10588 0.10588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Front_Left_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Front_Left_Joint"
+    type="continuous">
+    <origin
+      xyz="0.575 0.60032 -0.93"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Front_Left_Link" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="Front_Right_Link">
+    <inertial>
+      <origin
+        xyz="5.0736E-05 0.0039655 0.00021118"
+        rpy="0 0 0" />
+      <mass
+        value="5" />
+      <inertia
+        ixx="0.069061"
+        ixy="-5.184E-08"
+        ixz="-1.1979E-06"
+        iyy="0.13715"
+        iyz="-2.2976E-07"
+        izz="0.069063" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Front_Right_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.10588 0.10588 0.10588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Front_Right_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Front_Right_Joint"
+    type="continuous">
+    <origin
+      xyz="0.575 -0.59968 -0.93"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Front_Right_Link" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="Rear_Link_Link">
+    <inertial>
+      <origin
+        xyz="-7.3885E-09 0.040588 -0.26998"
+        rpy="0 0 0" />
+      <mass
+        value="10" />
+      <inertia
+        ixx="0.1689"
+        ixy="6.1635E-10"
+        ixz="7.3526E-09"
+        iyy="0.16629"
+        iyz="0.011954"
+        izz="0.017064" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Rear_Link_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Rear_Link_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Rear_Link_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.625 0.00064181 -0.48"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Rear_Link_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="0"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="Rear_Wheel_Link">
+    <inertial>
+      <origin
+        xyz="-8.4498E-05 0.0039655 -0.00020011"
+        rpy="0 0 0" />
+      <mass
+        value="5" />
+      <inertia
+        ixx="0.06906"
+        ixy="8.8515E-08"
+        ixz="-6.9765E-07"
+        iyy="0.13715"
+        iyz="2.1842E-07"
+        izz="0.069064" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Rear_Wheel_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.10588 0.10588 0.10588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://Sim_Robot_V2/meshes/Rear_Wheel_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Rear_Wheel_Joint"
+    type="continuous">
+    <origin
+      xyz="0 -0.030325 -0.45"
+      rpy="0 0 0" />
+    <parent
+      link="Rear_Link_Link" />
+    <child
+      link="Rear_Wheel_Link" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+</robot>
