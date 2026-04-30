@@ -32,6 +32,9 @@ DEFAULT_MAIN_LANE_COUNT = 2
 # ``ground_setup.py`` GroundPlane ``size`` so requested straights are not
 # capped far below DEFAULT_FIELD_LENGTH on a small square.
 DEFAULT_GROUND_SIZE = 40.0
+# Reserve extra forward length in ``clamp_field_length_to_ground`` so the 180° apex stays
+# on the square when the vehicle cuts wide vs the centreline polyline.
+CLAMP_UTURN_APEX_HEADROOM_M = 0.45
 
 # --- Physics / materials (keep in sync with ``ground_setup.py`` / ``robot_setup.py``) ---
 GRAVITY_MPS2 = 9.81
@@ -85,7 +88,7 @@ class RecommendedPurePursuitProfile:
     在「能跟住路径」与「少打滑、少抖舵」之间偏保守；调参只改这一处即可分叉版本。
     """
 
-    version: str = "2026.05-mud-v2"
+    version: str = "2026.05-mud-v3"
     friction_coupling: float = 0.48
     lookahead_gain: float = 1.0
     min_lookahead: float = 0.65
@@ -93,7 +96,8 @@ class RecommendedPurePursuitProfile:
     alpha: float = 0.55
     goal_tolerance: float = 0.3
     progress_search_behind: float = 1.0
-    progress_search_ahead: float = 3.0
+    progress_search_ahead: float = 11.0
+    progress_anchor_full_search_m: float = 1.35
     heading_gain: float = 0.88
     segment_jump_hysteresis_m: float = 0.35
     segment_penalty_m: float = 0.85
@@ -129,6 +133,7 @@ class RecommendedPurePursuitProfile:
             "steer_sign": float(steer_sign),
             "progress_search_behind": self.progress_search_behind,
             "progress_search_ahead": self.progress_search_ahead,
+            "progress_anchor_full_search_m": self.progress_anchor_full_search_m,
             "heading_gain": self.heading_gain,
             "segment_jump_hysteresis_m": self.segment_jump_hysteresis_m,
             "segment_penalty_m": self.segment_penalty_m,
@@ -148,7 +153,7 @@ class RecommendedPurePursuitProfile:
 class RecommendedIsaacPurePursuitScript:
     """Script Editor 层推荐：限速、爬升 / 执行器限幅、打滑启发式。"""
 
-    version: str = "2026.05-mud-v2"
+    version: str = "2026.05-mud-v3"
     cruise_speed_mps: float = 0.85
     turn_speed_mps: float = 0.15
     slowdown_curvature: float = 0.11
@@ -218,6 +223,7 @@ class PurePursuitTracker:
         segment_penalty_m: float = 0.85,
         progress_retrack_margin_m: float = 0.12,
         progress_relocalize_cte_m: float = 1.05,
+        progress_anchor_full_search_m: float = 1.35,
         heading_association_weight: float = 0.25,
         max_lateral_accel_mps2: float = 0.0,
         cte_gain: float = 0.0,
@@ -261,6 +267,8 @@ class PurePursuitTracker:
             raise ValueError("progress_retrack_margin_m must be non-negative")
         if progress_relocalize_cte_m < 0:
             raise ValueError("progress_relocalize_cte_m must be non-negative")
+        if progress_anchor_full_search_m < 0:
+            raise ValueError("progress_anchor_full_search_m must be non-negative (0 disables)")
         if heading_association_weight < 0:
             raise ValueError("heading_association_weight must be non-negative")
         if max_lateral_accel_mps2 < 0:
@@ -296,6 +304,7 @@ class PurePursuitTracker:
         self.segment_penalty_m = float(segment_penalty_m)
         self.progress_retrack_margin_m = float(progress_retrack_margin_m)
         self.progress_relocalize_cte_m = float(progress_relocalize_cte_m)
+        self.progress_anchor_full_search_m = float(progress_anchor_full_search_m)
         self.heading_association_weight = float(heading_association_weight)
         self.max_lateral_accel_mps2 = float(max_lateral_accel_mps2)
         self.cte_gain = float(cte_gain)
@@ -329,9 +338,15 @@ class PurePursuitTracker:
         widen_backward = (
             self._has_progress
             and self.total_length > 0.0
-            and prev_dist_early
-            > float(self.progress_relocalize_cte_m)
-            + max(float(self.progress_search_behind), float(self.progress_search_ahead))
+            and (
+                prev_dist_early
+                > float(self.progress_relocalize_cte_m)
+                + max(float(self.progress_search_behind), float(self.progress_search_ahead))
+                or (
+                    float(self.progress_anchor_full_search_m) > 0.0
+                    and prev_dist_early > float(self.progress_anchor_full_search_m)
+                )
+            )
         )
         if self._has_progress:
             min_progress = max(0.0, self._last_progress - self.progress_search_behind)
@@ -961,7 +976,7 @@ def straight_run_budget_on_square_ground(
     forward_to_edge = _forward_ray_positive_exit_distance(
         x=x, y=y, cos_theta=cos_t, sin_theta=sin_t, half=half
     )
-    forward_extent = float(turn_radius) + 0.35 * float(vehicle_half_length)
+    forward_extent = float(turn_radius) + 0.35 * float(vehicle_half_length) + CLAMP_UTURN_APEX_HEADROOM_M
     usable = float(forward_to_edge - margin - dynamic_margin - forward_extent)
     applied = float(np.clip(usable, min_length, requested_length))
     return {
@@ -1023,7 +1038,7 @@ def clamp_field_length_to_ground(
     # Start pose already insets ``vehicle_half_length`` (or turn radius) from the platform edge,
     # so counting the **full** half-length again here over-shortens the first straight. Keep a
     # small coupling term for nose clearance in tight fits.
-    forward_extent = float(turn_radius) + 0.35 * float(vehicle_half_length)
+    forward_extent = float(turn_radius) + 0.35 * float(vehicle_half_length) + CLAMP_UTURN_APEX_HEADROOM_M
     usable_length = float(forward_to_edge - margin - dynamic_margin - forward_extent)
     return float(np.clip(usable_length, min_length, requested_length))
 
@@ -1229,6 +1244,7 @@ __all__ = [
     "DEFAULT_TRACK_WIDTH",
     "DEFAULT_WHEEL_RADIUS",
     "DEFAULT_WHEELBASE",
+    "CLAMP_UTURN_APEX_HEADROOM_M",
     "GROUND_CONTACT_DAMPING",
     "GROUND_CONTACT_STIFFNESS",
     "GROUND_DYNAMIC_FRICTION",

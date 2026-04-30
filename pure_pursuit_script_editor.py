@@ -88,7 +88,7 @@ PLANNING_GROUND_EXTENT_M = float(DEFAULT_GROUND_SIZE)
 REQUESTED_STRAIGHT_RUN_M = math.inf
 # ``upper_left_plus_x`` = 先朝 +X；``upper_right_minus_x`` = 先朝 −X（用 ``first_straight_direction=west``，勿镜像整条折线）。
 PLATFORM_START_EDGE = "upper_right_minus_x"
-PLATFORM_MARGIN = 1.0
+PLATFORM_MARGIN = 1.25
 
 # 3D pose -> planar tracking frame (Isaac ``get_world_pose`` is SE(3)):
 # - offset is in the robot *body* frame (e.g. rear axle vs articulation root)
@@ -152,6 +152,7 @@ bot = PaddyRobotController()
 current_pos, _current_quat = bot.robot.get_world_pose()
 lane_spacing = FIELD_WIDTH / float(MAIN_LANE_COUNT - 1)
 turn_radius = lane_spacing / 2.0
+NOMINAL_U_SEMICIRCLE_ARC_M = math.pi * turn_radius
 start_x, start_y, start_theta = compute_platform_coverage_start_pose(
     ground_size=PLANNING_GROUND_EXTENT_M,
     turn_radius=turn_radius,
@@ -315,8 +316,22 @@ def pure_pursuit_step(_step_size: float) -> None:
         cte = _distance_to_path(tracker, track_xy)
         actual_steer = _joint_position_or_nan(bot, bot.rear_link_idx)
         straight_left_m = max(0.0, FIRST_STRAIGHT_LEN_M - float(raw_command.closest_progress))
+        pr = float(raw_command.closest_progress)
+        if pr < FIRST_STRAIGHT_LEN_M - 0.02:
+            nav_phase = (
+                f"phase=S0_straight | U_turn_at_progress={FIRST_STRAIGHT_LEN_M:.2f}m "
+                f"nominal_arc≈{NOMINAL_U_SEMICIRCLE_ARC_M:.2f}m"
+            )
+        elif pr < FIRST_STRAIGHT_LEN_M + NOMINAL_U_SEMICIRCLE_ARC_M + 2.0:
+            nav_phase = (
+                f"phase=U0_arc | s_into_turn={pr - FIRST_STRAIGHT_LEN_M:.2f}m "
+                f"(~0…{NOMINAL_U_SEMICIRCLE_ARC_M:.2f}m)"
+            )
+        else:
+            nav_phase = f"phase=post_U0 | progress={pr:.2f}m"
         print(
             "[pure_pursuit] "
+            f"{nav_phase} | "
             f"progress={raw_command.closest_progress:.2f}/{tracker.total_length:.2f}m "
             f"straight_left={straight_left_m:.2f}/{FIRST_STRAIGHT_LEN_M:.2f}m "
             f"k={raw_command.curvature:.3f} "
@@ -354,6 +369,8 @@ print(
     f"requested_cap={STRAIGHT_BUDGET['requested_cap_m']}\n"
     f"  FIELD_LENGTH_m (applied to polyline)={FIELD_LENGTH:.3f}\n"
     f"  world_first_seg_m={WORLD_STRAIGHT_CHECK_M:.3f}  matches_FIELD_LENGTH={_STRAIGHT_OK}\n"
+    f"  first_U_turn: begin steering when path_progress approaches {FIRST_STRAIGHT_LEN_M:.3f}m "
+    f"(nominal half-circle arc length ≈ {NOMINAL_U_SEMICIRCLE_ARC_M:.3f}m, polyline slightly longer)\n"
     "-------------------------------------------------------------------------",
 )
 print(
