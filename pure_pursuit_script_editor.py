@@ -81,16 +81,18 @@ SLIP_SPEED_FRACTION = SC.slip_speed_fraction
 VEHICLE_HALF_LENGTH_M = (DEFAULT_WHEELBASE + 2.0 * DEFAULT_WHEEL_RADIUS) / 2.0
 # Simple 回字 / U-turn demo: 三段长直道 + 两段 180° 半圆（``generate_main_lane_path``，``lane_count=3``）。
 MAIN_LANE_COUNT = 3
+# 地头半圆半径；行距 = 2R。R=3m 比之前 1.25m 更接近农机地头调头，避免 50° 打满舵硬拐。
+TURN_RADIUS_M = 3.0
 # 三行在 *y* 方向的总跨度（规划用长度单位）；转弯半径 = (FIELD_WIDTH / (lane_count-1)) / 2。
-FIELD_WIDTH = 5.0
+FIELD_WIDTH = 2.0 * TURN_RADIUS_M * float(MAIN_LANE_COUNT - 1)
 # Isaac ``GroundPlane(size=...)`` 的数值**不一定**等于米；以下只做**路径与限幅**用的方形边长（与你标定的一致即可）。
 # 若地台在 USD 里 40 但实际可跑 25 m，请把这里改成 25，不要把 ``ground_setup`` 的 40 死当成米。
 PLANNING_GROUND_EXTENT_M = float(DEFAULT_GROUND_SIZE)
-# 每一段「长直路」希望多长；先不用 ``math.inf`` 拉满，给首个 U 弯多留几米实车跟踪余量。
-REQUESTED_STRAIGHT_RUN_M = 28.0
+# 每一段「长直路」希望多长；先不用 ``math.inf`` 拉满，给 U 弯留足实车跟踪余量。
+REQUESTED_STRAIGHT_RUN_M = 24.0
 # ``upper_left_plus_x`` = 先朝 +X；``upper_right_minus_x`` = 先朝 −X（用 ``first_straight_direction=west``，勿镜像整条折线）。
 PLATFORM_START_EDGE = "upper_right_minus_x"
-PLATFORM_MARGIN = 1.25
+PLATFORM_MARGIN = 2.0
 
 # 3D pose -> planar tracking frame (Isaac ``get_world_pose`` is SE(3)):
 # - offset is in the robot *body* frame (e.g. rear axle vs articulation root)

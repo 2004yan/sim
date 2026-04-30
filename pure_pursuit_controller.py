@@ -88,7 +88,7 @@ class RecommendedPurePursuitProfile:
     在「能跟住路径」与「少打滑、少抖舵」之间偏保守；调参只改这一处即可分叉版本。
     """
 
-    version: str = "2026.05-mud-v6"
+    version: str = "2026.05-mud-v7"
     friction_coupling: float = 0.48
     lookahead_gain: float = 1.0
     min_lookahead: float = 0.65
@@ -96,8 +96,8 @@ class RecommendedPurePursuitProfile:
     alpha: float = 0.55
     goal_tolerance: float = 0.3
     progress_search_behind: float = 1.0
-    progress_search_ahead: float = 11.0
-    progress_anchor_full_search_m: float = 2.58
+    progress_search_ahead: float = 1.2
+    progress_anchor_full_search_m: float = 0.0
     progress_tie_break_epsilon_m: float = 0.38
     progress_stuck_path_err_m: float = 1.05
     progress_stuck_escape_m: float = 0.42
@@ -165,7 +165,7 @@ class RecommendedPurePursuitProfile:
 class RecommendedIsaacPurePursuitScript:
     """Script Editor 层推荐：限速、爬升 / 执行器限幅、打滑启发式。"""
 
-    version: str = "2026.05-mud-v6"
+    version: str = "2026.05-mud-v7"
     cruise_speed_mps: float = 0.85
     turn_speed_mps: float = 0.15
     slowdown_curvature: float = 0.11
@@ -542,7 +542,7 @@ class PurePursuitTracker:
             )
         curvature_cte = (cte_gain_eff * cte_signed / denom) if cte_gain_eff > 0.0 else 0.0
 
-        curvature = float(curvature_geom + curvature_heading + curvature_cte)
+        curvature = 0.0 if in_first_straight else float(curvature_geom + curvature_heading + curvature_cte)
         max_curvature_geom = math.tan(self.max_steer) / self.wheelbase
         if self.max_lateral_accel_mps2 > 0.0 and abs(speed) > 0.08:
             max_curvature_lat = self.max_lateral_accel_mps2 / (speed * speed)
