@@ -389,20 +389,28 @@ class PurePursuitTracker:
             )
 
         speed = float(v_mps)
+        spe = self.phase_straight_end_progress
+        in_first_straight = spe is not None and closest_progress < float(spe) - 1e-6
+
         lookahead0 = float(
             np.clip(abs(speed) * self.lookahead_gain, self.min_lookahead, self.max_lookahead)
         )
-        k_path = self._path_curvature_estimate(closest_progress, lookahead0)
-        lookahead = float(
-            np.clip(
-                lookahead0 * (1.0 + self.path_lookahead_gain * abs(k_path)),
-                self.min_lookahead,
-                self.max_lookahead,
+        if in_first_straight:
+            # On the first long straight, classic PP ``2*y/L^2`` curvature reacts violently to
+            # small pose / rate noise and to inflated lookahead from ``path_lookahead_gain``
+            # near segment boundaries — the log ``k→1`` with ``progress≪straight_len`` case.
+            k_path = 0.0
+            lookahead = lookahead0
+        else:
+            k_path = self._path_curvature_estimate(closest_progress, lookahead0)
+            lookahead = float(
+                np.clip(
+                    lookahead0 * (1.0 + self.path_lookahead_gain * abs(k_path)),
+                    self.min_lookahead,
+                    self.max_lookahead,
+                )
             )
-        )
         target_progress = min(closest_progress + lookahead, self.total_length)
-        spe = self.phase_straight_end_progress
-        in_first_straight = spe is not None and closest_progress < float(spe) - 1e-6
         if spe is not None:
             spe_f = float(spe)
             if closest_progress <= spe_f + 1e-9:
@@ -415,7 +423,10 @@ class PurePursuitTracker:
         x_body = cos_t * dx + sin_t * dy
         y_body = -sin_t * dx + cos_t * dy
         dist_sq = x_body * x_body + y_body * y_body
-        curvature_geom = 0.0 if dist_sq <= 1e-9 else 2.0 * y_body / dist_sq
+        if in_first_straight:
+            curvature_geom = 0.0
+        else:
+            curvature_geom = 0.0 if dist_sq <= 1e-9 else 2.0 * y_body / dist_sq
 
         path_heading = self._path_heading_at_progress(closest_progress)
         heading_error = self._wrap_angle(path_heading - theta)
@@ -428,7 +439,7 @@ class PurePursuitTracker:
         err = position - closest_xy
         cte_signed = float(tang[0] * err[1] - tang[1] * err[0])
         denom = max(abs(speed) * lookahead_distance + self.cte_softening_m, 1e-3)
-        cte_gain_eff = (0.25 * self.cte_gain) if in_first_straight else self.cte_gain
+        cte_gain_eff = (0.35 * self.cte_gain) if in_first_straight else self.cte_gain
         curvature_cte = (cte_gain_eff * cte_signed / denom) if cte_gain_eff > 0.0 else 0.0
 
         curvature = float(curvature_geom + curvature_heading + curvature_cte)
@@ -804,11 +815,19 @@ def generate_main_lane_path(
     field_width: float = DEFAULT_FIELD_WIDTH,
     lane_count: int = DEFAULT_MAIN_LANE_COUNT,
     turn_samples: int = 40,
+    first_straight_direction: str = "east",
 ) -> list[tuple[float, float]]:
     """Generate a feasible demo path with 2 or 3 main vehicle-center lanes.
 
     U-turns are a **single** semicircle per transition (continuous :math:`\\pi` rad in
     heading along the polyline), not two quarter-turn polylines.
+
+    ``first_straight_direction``:
+    - ``"east"``: start at ``(0, field_width)``, first run toward ``+x`` (legacy).
+    - ``"west"``: start at ``(field_length, field_width)``, first run toward ``-x``.
+      Use this with a **right-edge** spawn and :math:`\\theta=\\pi`; do **not** use
+      :func:`mirror_path_along_field_length` on an east path — mirroring flips the
+      U-turn bulge and drives the arc **off** the strip.
     """
     if field_length <= 0:
         raise ValueError("field_length must be positive")
@@ -818,17 +837,26 @@ def generate_main_lane_path(
         raise ValueError("lane_count must be at least 2")
     if turn_samples < 2:
         raise ValueError("turn_samples must be at least 2")
+    if first_straight_direction not in ("east", "west"):
+        raise ValueError("first_straight_direction must be 'east' or 'west'")
 
     lane_spacing = field_width / float(lane_count - 1)
     turn_radius = lane_spacing / 2.0
-    path: list[tuple[float, float]] = [(0.0, float(field_width))]
+    if first_straight_direction == "east":
+        path: list[tuple[float, float]] = [(0.0, float(field_width))]
+    else:
+        path = [(float(field_length), float(field_width))]
 
     for turn_index in range(lane_count - 1):
         y_top = field_width - turn_index * lane_spacing
         y_bottom = y_top - lane_spacing
         going_right = turn_index % 2 == 0
-        straight_end_x = field_length if going_right else 0.0
-        side_sign = 1.0 if going_right else -1.0
+        if first_straight_direction == "east":
+            straight_end_x = field_length if going_right else 0.0
+            side_sign = 1.0 if going_right else -1.0
+        else:
+            straight_end_x = 0.0 if going_right else field_length
+            side_sign = 1.0 if going_right else -1.0
         center_y = y_top - turn_radius
 
         _append_unique(path, (straight_end_x, y_top))
@@ -865,6 +893,84 @@ def transform_path_to_pose(
         world_y = y + sin_t * dx + cos_t * dy
         anchored.append((float(world_x), float(world_y)))
     return anchored
+
+
+def _forward_ray_positive_exit_distance(
+    *,
+    x: float,
+    y: float,
+    cos_theta: float,
+    sin_theta: float,
+    half: float,
+) -> float:
+    distances: list[float] = []
+    if cos_theta > 1e-9:
+        distances.append((half - x) / cos_theta)
+    elif cos_theta < -1e-9:
+        distances.append((-half - x) / cos_theta)
+    if sin_theta > 1e-9:
+        distances.append((half - y) / sin_theta)
+    elif sin_theta < -1e-9:
+        distances.append((-half - y) / sin_theta)
+    return min((distance for distance in distances if distance > 0.0), default=math.inf)
+
+
+def straight_run_budget_on_square_ground(
+    *,
+    x: float,
+    y: float,
+    theta: float,
+    requested_length: float,
+    turn_radius: float,
+    ground_size: float = DEFAULT_GROUND_SIZE,
+    margin: float = 1.0,
+    min_length: float = 2.0,
+    dynamic_margin: float = 0.0,
+    vehicle_half_length: float = 0.0,
+) -> dict[str, float]:
+    """Transparency helper: same numbers as inside ``clamp_field_length_to_ground``.
+
+    Use this in Script Editor to print *why* ``FIELD_LENGTH`` is what it is, without
+    trusting commentary. Keys are all in metres (or your planning length unit).
+    """
+    if math.isnan(requested_length):
+        raise ValueError("requested_length must not be NaN")
+    if math.isinf(requested_length):
+        if requested_length < 0:
+            raise ValueError("requested_length must not be -inf")
+    elif requested_length <= 0:
+        raise ValueError("requested_length must be positive")
+    if turn_radius < 0:
+        raise ValueError("turn_radius must be non-negative")
+    if ground_size <= 0:
+        raise ValueError("ground_size must be positive")
+    if margin < 0:
+        raise ValueError("margin must be non-negative")
+    if min_length <= 0:
+        raise ValueError("min_length must be positive")
+    if dynamic_margin < 0:
+        raise ValueError("dynamic_margin must be non-negative")
+    if vehicle_half_length < 0:
+        raise ValueError("vehicle_half_length must be non-negative")
+
+    half = ground_size / 2.0
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    forward_to_edge = _forward_ray_positive_exit_distance(
+        x=x, y=y, cos_theta=cos_t, sin_theta=sin_t, half=half
+    )
+    forward_extent = float(turn_radius) + 0.35 * float(vehicle_half_length)
+    usable = float(forward_to_edge - margin - dynamic_margin - forward_extent)
+    applied = float(np.clip(usable, min_length, requested_length))
+    return {
+      "forward_to_edge_m": float(forward_to_edge),
+      "margin_m": float(margin),
+      "dynamic_margin_m": float(dynamic_margin),
+      "uturn_clearance_m": float(forward_extent),
+      "usable_before_clip_m": usable,
+      "requested_cap_m": float(requested_length) if math.isfinite(requested_length) else float("inf"),
+      "field_length_applied_m": applied,
+    }
 
 
 def clamp_field_length_to_ground(
@@ -906,25 +1012,17 @@ def clamp_field_length_to_ground(
         raise ValueError("vehicle_half_length must be non-negative")
 
     half = ground_size / 2.0
-    dx = math.cos(theta)
-    dy = math.sin(theta)
-    distances: list[float] = []
-    if dx > 1e-9:
-        distances.append((half - x) / dx)
-    elif dx < -1e-9:
-        distances.append((-half - x) / dx)
-    if dy > 1e-9:
-        distances.append((half - y) / dy)
-    elif dy < -1e-9:
-        distances.append((-half - y) / dy)
-
-    forward_to_edge = min((distance for distance in distances if distance > 0.0), default=requested_length)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    forward_to_edge = _forward_ray_positive_exit_distance(
+        x=x, y=y, cos_theta=cos_t, sin_theta=sin_t, half=half
+    )
     # ``turn_radius`` reserves space for the 180° arc apex beyond the lane corner (centerline).
     # Start pose already insets ``vehicle_half_length`` (or turn radius) from the platform edge,
     # so counting the **full** half-length again here over-shortens the first straight. Keep a
     # small coupling term for nose clearance in tight fits.
     forward_extent = float(turn_radius) + 0.35 * float(vehicle_half_length)
-    usable_length = forward_to_edge - margin - dynamic_margin - forward_extent
+    usable_length = float(forward_to_edge - margin - dynamic_margin - forward_extent)
     return float(np.clip(usable_length, min_length, requested_length))
 
 
@@ -1013,7 +1111,15 @@ def mirror_path_along_field_length(
     *,
     field_length: float,
 ) -> list[tuple[float, float]]:
-    """Reflect path in x about ``x = field_length / 2`` so the first run goes west."""
+    """Reflect path in x about ``x = field_length / 2`` (same as ``x' = L - x``).
+
+    .. warning::
+        **Do not** use this to reverse an east-bound ``generate_main_lane_path``
+        polyline. It swaps the ends of each straight but **flips** whether the
+        U-turn bulge is toward ``+x`` or ``-x``, so the semicircle can point **off**
+        the strip and drive the robot off the platform. Use
+        ``generate_main_lane_path(..., first_straight_direction=\"west\")`` instead.
+    """
     if field_length <= 0:
         raise ValueError("field_length must be positive")
     points = [(float(px), float(py)) for px, py in path]
@@ -1151,6 +1257,7 @@ __all__ = [
     "speed_from_curvature",
     "tracking_point_world",
     "tracking_pose_for_planar_path",
+    "straight_run_budget_on_square_ground",
     "transform_path_to_pose",
     "yaw_from_quat",
 ]

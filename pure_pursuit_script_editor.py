@@ -36,11 +36,11 @@ from pure_pursuit_controller import (
     clamp_field_length_to_ground,
     compute_platform_coverage_start_pose,
     generate_main_lane_path,
-    mirror_path_along_field_length,
     limit_actuator_command,
     planar_speed_from_linear_velocity,
     quat_from_yaw,
     speed_from_curvature,
+    straight_run_budget_on_square_ground,
     tracking_pose_for_planar_path,
     transform_path_to_pose,
     yaw_from_quat,
@@ -86,7 +86,7 @@ FIELD_WIDTH = 5.0
 PLANNING_GROUND_EXTENT_M = float(DEFAULT_GROUND_SIZE)
 # 每一段「长直路」希望多长；``math.inf`` 表示在平地范围内尽量拉满（由 ``clamp_field_length_to_ground`` 决定）。
 REQUESTED_STRAIGHT_RUN_M = math.inf
-# ``upper_left_plus_x`` = 先朝 +X；``upper_right_minus_x`` = 先朝 −X（需镜像路径）。
+# ``upper_left_plus_x`` = 先朝 +X；``upper_right_minus_x`` = 先朝 −X（用 ``first_straight_direction=west``，勿镜像整条折线）。
 PLATFORM_START_EDGE = "upper_right_minus_x"
 PLATFORM_MARGIN = 1.0
 
@@ -177,15 +177,26 @@ FIELD_LENGTH = clamp_field_length_to_ground(
     dynamic_margin=DYNAMIC_MARGIN_M,
     vehicle_half_length=VEHICLE_HALF_LENGTH_M,
 )
+STRAIGHT_BUDGET = straight_run_budget_on_square_ground(
+    x=start_x,
+    y=start_y,
+    theta=start_theta,
+    requested_length=REQUESTED_STRAIGHT_RUN_M,
+    turn_radius=turn_radius,
+    ground_size=PLANNING_GROUND_EXTENT_M,
+    margin=PLATFORM_MARGIN,
+    dynamic_margin=DYNAMIC_MARGIN_M,
+    vehicle_half_length=VEHICLE_HALF_LENGTH_M,
+)
 
+PATH_FIRST_RUN = "west" if PLATFORM_START_EDGE == "upper_right_minus_x" else "east"
 LOCAL_WAYPOINTS = generate_main_lane_path(
     field_length=FIELD_LENGTH,
     field_width=FIELD_WIDTH,
     lane_count=MAIN_LANE_COUNT,
     turn_samples=48,
+    first_straight_direction=PATH_FIRST_RUN,
 )
-if PLATFORM_START_EDGE == "upper_right_minus_x":
-    LOCAL_WAYPOINTS = mirror_path_along_field_length(LOCAL_WAYPOINTS, field_length=FIELD_LENGTH)
 WAYPOINTS = transform_path_to_pose(
     LOCAL_WAYPOINTS,
     x=start_x,
@@ -193,6 +204,10 @@ WAYPOINTS = transform_path_to_pose(
     theta=0.0,
 )
 FIRST_STRAIGHT_LEN_M = float(np.linalg.norm(np.asarray(WAYPOINTS[1]) - np.asarray(WAYPOINTS[0])))
+WORLD_STRAIGHT_CHECK_M = float(
+    np.linalg.norm(np.asarray(WAYPOINTS[1], dtype=float)[:2] - np.asarray(WAYPOINTS[0], dtype=float)[:2])
+)
+_STRAIGHT_OK = math.isclose(WORLD_STRAIGHT_CHECK_M, FIELD_LENGTH, rel_tol=0.0, abs_tol=0.05)
 tracker = PurePursuitTracker(
     WAYPOINTS,
     wheelbase=DEFAULT_WHEELBASE,
@@ -328,12 +343,27 @@ physx_interface = omni.physx.get_physx_interface()
 subscription = physx_interface.subscribe_physics_step_events(pure_pursuit_step)
 setattr(builtins, SUBSCRIPTION_ATTR, subscription)
 print(
+    "---- pure_pursuit STRAIGHT_CONTRACT (copy this if lengths look wrong) ----\n"
+    f"  planning_extent_m={PLANNING_GROUND_EXTENT_M} start=({start_x:.3f},{start_y:.3f}) "
+    f"heading_rad={start_theta:.4f}\n"
+    f"  ray_exit_to_square_edge_m={STRAIGHT_BUDGET['forward_to_edge_m']:.3f}  "
+    f"- margin - dynamic - uturn_clearance\n"
+    f"  margin_m={STRAIGHT_BUDGET['margin_m']:.3f}  dynamic_m={STRAIGHT_BUDGET['dynamic_margin_m']:.3f}  "
+    f"uturn_clearance_m={STRAIGHT_BUDGET['uturn_clearance_m']:.3f}\n"
+    f"  usable_before_clip_m={STRAIGHT_BUDGET['usable_before_clip_m']:.3f}  "
+    f"requested_cap={STRAIGHT_BUDGET['requested_cap_m']}\n"
+    f"  FIELD_LENGTH_m (applied to polyline)={FIELD_LENGTH:.3f}\n"
+    f"  world_first_seg_m={WORLD_STRAIGHT_CHECK_M:.3f}  matches_FIELD_LENGTH={_STRAIGHT_OK}\n"
+    "-------------------------------------------------------------------------",
+)
+print(
     "[pure_pursuit] PhysX subscription installed: "
     f"preset=({PP.version},{SC.version}) "
     f"{len(WAYPOINTS)} path points, start=({float(start_pos[0]):.2f}, "
     f"{float(start_pos[1]):.2f}), heading={start_theta:.2f}rad, "
     f"path=simple_Ux2 (lanes={MAIN_LANE_COUNT}) straight_run={FIELD_LENGTH} "
     f"field_W={FIELD_WIDTH} "
-    f"edge={PLATFORM_START_EDGE} planning_extent={PLANNING_GROUND_EXTENT_M} "
-    f"speed={TURN_SPEED_MPS}-{CRUISE_SPEED_MPS}m/s"
+    f"edge={PLATFORM_START_EDGE} first_run={PATH_FIRST_RUN} "
+    f"planning_extent={PLANNING_GROUND_EXTENT_M} "
+    f"speed={TURN_SPEED_MPS}-{CRUISE_SPEED_MPS}m/s",
 )
