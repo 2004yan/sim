@@ -222,6 +222,10 @@ U_TURN_PHASES = [
         FIRST_STRAIGHT_LEN_M + 2.0 * NOMINAL_U_SEMICIRCLE_ARC_M + FIELD_LENGTH,
     ),
 ]
+# 固定路径规划场景下，U 弯必须保持同一个曲率方向转完 180°，不能让 CTE 修正把方向反过来。
+# 当前 west-first 三行路径的两个地头半圆都是同一几何旋向（+curvature）。
+U_TURN_CURVATURE_SIGN = 1.0
+U_TURN_NOMINAL_CURVATURE = 1.0 / turn_radius
 tracker = PurePursuitTracker(
     WAYPOINTS,
     wheelbase=DEFAULT_WHEELBASE,
@@ -239,6 +243,31 @@ pose_state = {
     "last_xy": np.array([start_x, start_y], dtype=float),
     "v_measured": 0.0,
 }
+
+
+def _in_u_turn(progress: float) -> bool:
+    p = float(progress)
+    return any(start <= p <= end for start, end in U_TURN_PHASES)
+
+
+def _lock_u_turn_curvature(command):
+    """Keep every U-turn as one fixed-direction half-circle."""
+    if not _in_u_turn(command.closest_progress):
+        return command
+    desired_abs = max(abs(float(command.curvature)), 0.85 * U_TURN_NOMINAL_CURVATURE)
+    max_curvature = math.tan(MAX_STEER_RAD) / DEFAULT_WHEELBASE
+    curvature = float(np.clip(U_TURN_CURVATURE_SIGN * desired_abs, -max_curvature, max_curvature))
+    speed_mps = TURN_SPEED_MPS
+    omega_diff = PP.alpha * curvature * speed_mps
+    left_mps = max(speed_mps - omega_diff * DEFAULT_TRACK_WIDTH / 2.0, 0.0)
+    right_mps = max(speed_mps + omega_diff * DEFAULT_TRACK_WIDTH / 2.0, 0.0)
+    return replace(
+        command,
+        curvature=curvature,
+        left_rad_s=left_mps / DEFAULT_WHEEL_RADIUS,
+        right_rad_s=right_mps / DEFAULT_WHEEL_RADIUS,
+        steer_rad=float(np.clip(ISAAC_REAR_STEER_SIGN * math.atan(curvature * DEFAULT_WHEELBASE), -MAX_STEER_RAD, MAX_STEER_RAD)),
+    )
 
 
 def _advance_speed(current_speed: float, target_speed: float, step_size: float) -> float:
@@ -277,6 +306,7 @@ def pure_pursuit_step(_step_size: float) -> None:
         theta=yaw_planar,
         v_mps=v_mps,
     )
+    raw_command = _lock_u_turn_curvature(raw_command)
     stalling = (
         pose_state["v_measured"] < STALL_SPEED_MPS
         and abs(raw_command.curvature) > STALL_CURVATURE
