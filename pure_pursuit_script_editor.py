@@ -86,8 +86,8 @@ FIELD_WIDTH = 5.0
 # Isaac ``GroundPlane(size=...)`` 的数值**不一定**等于米；以下只做**路径与限幅**用的方形边长（与你标定的一致即可）。
 # 若地台在 USD 里 40 但实际可跑 25 m，请把这里改成 25，不要把 ``ground_setup`` 的 40 死当成米。
 PLANNING_GROUND_EXTENT_M = float(DEFAULT_GROUND_SIZE)
-# 每一段「长直路」希望多长；``math.inf`` 表示在平地范围内尽量拉满（由 ``clamp_field_length_to_ground`` 决定）。
-REQUESTED_STRAIGHT_RUN_M = math.inf
+# 每一段「长直路」希望多长；先不用 ``math.inf`` 拉满，给首个 U 弯多留几米实车跟踪余量。
+REQUESTED_STRAIGHT_RUN_M = 28.0
 # ``upper_left_plus_x`` = 先朝 +X；``upper_right_minus_x`` = 先朝 −X（用 ``first_straight_direction=west``，勿镜像整条折线）。
 PLATFORM_START_EDGE = "upper_right_minus_x"
 PLATFORM_MARGIN = 1.25

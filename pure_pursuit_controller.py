@@ -88,7 +88,7 @@ class RecommendedPurePursuitProfile:
     在「能跟住路径」与「少打滑、少抖舵」之间偏保守；调参只改这一处即可分叉版本。
     """
 
-    version: str = "2026.05-mud-v5"
+    version: str = "2026.05-mud-v6"
     friction_coupling: float = 0.48
     lookahead_gain: float = 1.0
     min_lookahead: float = 0.65
@@ -165,7 +165,7 @@ class RecommendedPurePursuitProfile:
 class RecommendedIsaacPurePursuitScript:
     """Script Editor 层推荐：限速、爬升 / 执行器限幅、打滑启发式。"""
 
-    version: str = "2026.05-mud-v5"
+    version: str = "2026.05-mud-v6"
     cruise_speed_mps: float = 0.85
     turn_speed_mps: float = 0.15
     slowdown_curvature: float = 0.11
@@ -983,7 +983,7 @@ def generate_main_lane_path(
             side_sign = 1.0 if going_right else -1.0
         else:
             straight_end_x = 0.0 if going_right else field_length
-            side_sign = 1.0 if going_right else -1.0
+            side_sign = -1.0 if going_right else 1.0
         center_y = y_top - turn_radius
 
         _append_unique(path, (straight_end_x, y_top))
