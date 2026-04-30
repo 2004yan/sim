@@ -54,6 +54,7 @@ class PurePursuitTracker:
         allow_reverse_wheels: bool = False,
         progress_search_behind: float = 1.0,
         progress_search_ahead: float = math.inf,
+        heading_gain: float = 0.0,
     ) -> None:
         self.path = np.asarray(path, dtype=float)
         if self.path.ndim != 2 or self.path.shape[1] != 2 or len(self.path) < 2:
@@ -79,6 +80,8 @@ class PurePursuitTracker:
             raise ValueError("progress_search_behind must be non-negative")
         if progress_search_ahead <= 0:
             raise ValueError("progress_search_ahead must be positive")
+        if heading_gain < 0:
+            raise ValueError("heading_gain must be non-negative")
 
         self.wheelbase = float(wheelbase)
         self.track_width = float(track_width)
@@ -93,6 +96,7 @@ class PurePursuitTracker:
         self.allow_reverse_wheels = bool(allow_reverse_wheels)
         self.progress_search_behind = float(progress_search_behind)
         self.progress_search_ahead = float(progress_search_ahead)
+        self.heading_gain = float(heading_gain)
 
         self._segments = self.path[1:] - self.path[:-1]
         self._segment_lengths = np.linalg.norm(self._segments, axis=1)
@@ -146,7 +150,13 @@ class PurePursuitTracker:
         x_body = cos_t * dx + sin_t * dy
         y_body = -sin_t * dx + cos_t * dy
         dist_sq = x_body * x_body + y_body * y_body
-        curvature = 0.0 if dist_sq <= 1e-9 else 2.0 * y_body / dist_sq
+        curvature_geom = 0.0 if dist_sq <= 1e-9 else 2.0 * y_body / dist_sq
+
+        path_heading = self._path_heading_at_progress(closest_progress)
+        heading_error = self._wrap_angle(path_heading - theta)
+        lookahead_distance = max(lookahead, self.min_lookahead)
+        curvature_heading = -self.heading_gain * math.sin(heading_error) / lookahead_distance
+        curvature = float(curvature_geom + curvature_heading)
         max_curvature = math.tan(self.max_steer) / self.wheelbase
         curvature = float(np.clip(curvature, -max_curvature, max_curvature))
 
@@ -182,29 +192,56 @@ class PurePursuitTracker:
         max_progress = self.total_length if max_progress is None else float(np.clip(max_progress, 0.0, self.total_length))
         if max_progress < min_progress:
             min_progress, max_progress = max_progress, min_progress
+
         best_dist_sq = math.inf
         best_progress = min_progress
 
         for index, segment in enumerate(self._segments):
             segment_start = float(self._cum_lengths[index])
             segment_end = float(self._cum_lengths[index + 1])
-            window_start = max(segment_start, min_progress)
-            window_end = min(segment_end, max_progress)
-            if window_end < window_start:
-                continue
+            seg_len = float(self._segment_lengths[index])
             start = self.path[index]
-            length = self._segment_lengths[index]
-            t = float(np.dot(position - start, segment) / (length * length))
-            t = float(np.clip(t, 0.0, 1.0))
-            progress = float(np.clip(segment_start + t * length, window_start, window_end))
-            t = (progress - segment_start) / length
+
+            if segment_end < min_progress or segment_start > max_progress:
+                continue
+
+            t_min = float(np.clip((min_progress - segment_start) / seg_len, 0.0, 1.0))
+            t_max = float(np.clip((max_progress - segment_start) / seg_len, 0.0, 1.0))
+            if t_min > t_max:
+                t_min, t_max = t_max, t_min
+
+            t_raw = float(np.dot(position - start, segment) / (seg_len * seg_len))
+            t = float(np.clip(t_raw, t_min, t_max))
+            progress = float(segment_start + t * seg_len)
             projection = start + t * segment
             dist_sq = float(np.dot(position - projection, position - projection))
             if dist_sq < best_dist_sq:
                 best_dist_sq = dist_sq
                 best_progress = progress
 
+            for edge_t in (t_min, t_max):
+                edge_progress = float(segment_start + edge_t * seg_len)
+                edge_point = start + edge_t * segment
+                edge_dist_sq = float(np.dot(position - edge_point, position - edge_point))
+                if edge_dist_sq < best_dist_sq:
+                    best_dist_sq = edge_dist_sq
+                    best_progress = edge_progress
+
         return best_progress
+
+    def _path_heading_at_progress(self, progress: float) -> float:
+        progress = float(np.clip(progress, 0.0, self.total_length))
+        if progress >= self.total_length - 1e-9:
+            tangent = self._segments[-1]
+        else:
+            index = int(np.searchsorted(self._cum_lengths, progress, side="right") - 1)
+            index = min(index, len(self._segments) - 1)
+            tangent = self._segments[index]
+        return float(math.atan2(float(tangent[1]), float(tangent[0])))
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
     def _point_at_progress(self, progress: float) -> np.ndarray:
         progress = float(np.clip(progress, 0.0, self.total_length))
@@ -352,6 +389,7 @@ def clamp_field_length_to_ground(
     margin: float = 1.0,
     min_length: float = 2.0,
     dynamic_margin: float = 0.0,
+    vehicle_half_length: float = 0.0,
 ) -> float:
     """Clamp forward path length so the far turn stays inside a square ground plane."""
     if requested_length <= 0:
@@ -366,6 +404,8 @@ def clamp_field_length_to_ground(
         raise ValueError("min_length must be positive")
     if dynamic_margin < 0:
         raise ValueError("dynamic_margin must be non-negative")
+    if vehicle_half_length < 0:
+        raise ValueError("vehicle_half_length must be non-negative")
 
     half = ground_size / 2.0
     dx = math.cos(theta)
@@ -381,7 +421,8 @@ def clamp_field_length_to_ground(
         distances.append((-half - y) / dy)
 
     forward_to_edge = min((distance for distance in distances if distance > 0.0), default=requested_length)
-    usable_length = forward_to_edge - margin - turn_radius - dynamic_margin
+    forward_extent = turn_radius + vehicle_half_length
+    usable_length = forward_to_edge - margin - dynamic_margin - forward_extent
     return float(np.clip(usable_length, min_length, requested_length))
 
 

@@ -62,12 +62,14 @@ MAX_STEER_RATE_RAD_S = math.radians(60.0)
 ISAAC_REAR_STEER_SIGN = -1.0
 DYNAMIC_MARGIN_M = 0.5
 LOOKAHEAD_MIN_M = 0.6
-LOOKAHEAD_MAX_M = 1.0
+LOOKAHEAD_MAX_M = 1.2
+HEADING_GAIN_PATH = 0.9
 DEBUG_PERIOD_S = 0.5
 STALL_SPEED_MPS = 0.03
 STALL_CURVATURE = 0.5
 STALL_CRAWL_SPEED_MPS = 0.25
 STALL_MAX_STEER_RAD = math.radians(15.0)
+VEHICLE_HALF_LENGTH_M = (DEFAULT_WHEELBASE + 2.0 * DEFAULT_WHEEL_RADIUS) / 2.0
 REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = 5.0
 GROUND_SIZE = DEFAULT_GROUND_SIZE
@@ -151,6 +153,7 @@ FIELD_LENGTH = clamp_field_length_to_ground(
     ground_size=GROUND_SIZE,
     margin=PLATFORM_MARGIN,
     dynamic_margin=DYNAMIC_MARGIN_M,
+    vehicle_half_length=VEHICLE_HALF_LENGTH_M,
 )
 
 # Use the feasible demo path by default. Set MAIN_LANE_COUNT to 2 for a wider
@@ -166,6 +169,7 @@ WAYPOINTS = transform_path_to_pose(
     y=start_y,
     theta=start_theta,
 )
+FIRST_STRAIGHT_LEN_M = float(np.linalg.norm(np.asarray(WAYPOINTS[1]) - np.asarray(WAYPOINTS[0])))
 tracker = PurePursuitTracker(
     WAYPOINTS,
     wheelbase=DEFAULT_WHEELBASE,
@@ -179,6 +183,7 @@ tracker = PurePursuitTracker(
     goal_tolerance=0.3,
     steer_sign=ISAAC_REAR_STEER_SIGN,
     progress_search_ahead=3.0,
+    heading_gain=HEADING_GAIN_PATH,
 )
 speed_state = {"v_mps": TURN_SPEED_MPS}
 command_state = {
@@ -259,9 +264,11 @@ def pure_pursuit_step(_step_size: float) -> None:
         debug_state["elapsed_s"] = 0.0
         cte = _distance_to_path(tracker, xy)
         actual_steer = _joint_position_or_nan(bot, bot.rear_link_idx)
+        straight_left_m = max(0.0, FIRST_STRAIGHT_LEN_M - float(raw_command.closest_progress))
         print(
             "[pure_pursuit] "
             f"progress={raw_command.closest_progress:.2f}/{tracker.total_length:.2f}m "
+            f"straight_left={straight_left_m:.2f}/{FIRST_STRAIGHT_LEN_M:.2f}m "
             f"k={raw_command.curvature:.3f} "
             f"target_v={target_speed:.2f} cmd_v={speed_state['v_mps']:.2f} "
             f"meas_v={pose_state['v_measured']:.2f} "
