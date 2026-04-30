@@ -411,10 +411,12 @@ class PurePursuitTracker:
                 )
             )
         target_progress = min(closest_progress + lookahead, self.total_length)
-        if spe is not None:
-            spe_f = float(spe)
-            if closest_progress <= spe_f + 1e-9:
-                target_progress = min(target_progress, spe_f)
+        # Only cap lookahead while we are *inside* the first straight (same condition as
+        # ``in_first_straight``). Using ``closest_progress <= spe`` here kept the lookahead
+        # stuck exactly *on the U-turn vertex* at progress ``spe``, giving zero PP curvature
+        # and "straight finished but never steers into the arc" in sim.
+        if in_first_straight and spe is not None:
+            target_progress = min(target_progress, float(spe))
         lookahead_point = self._point_at_progress(target_progress)
 
         dx, dy = lookahead_point - position
