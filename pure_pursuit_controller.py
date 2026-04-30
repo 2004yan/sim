@@ -88,11 +88,11 @@ class RecommendedPurePursuitProfile:
     在「能跟住路径」与「少打滑、少抖舵」之间偏保守；调参只改这一处即可分叉版本。
     """
 
-    version: str = "2026.05-mud-v7"
+    version: str = "2026.05-mud-v8"
     friction_coupling: float = 0.48
     lookahead_gain: float = 1.0
-    min_lookahead: float = 0.65
-    max_lookahead: float = 1.12
+    min_lookahead: float = 1.6
+    max_lookahead: float = 2.4
     alpha: float = 0.55
     goal_tolerance: float = 0.3
     progress_search_behind: float = 1.0
@@ -104,15 +104,15 @@ class RecommendedPurePursuitProfile:
     heading_association_far_scale_m: float = 1.15
     cte_gain_far_error_scale: float = 2.15
     cte_far_error_m: float = 1.05
-    heading_gain: float = 0.88
+    heading_gain: float = 0.0
     segment_jump_hysteresis_m: float = 0.35
     segment_penalty_m: float = 0.85
     progress_retrack_margin_m: float = 0.12
     progress_relocalize_cte_m: float = 1.05
     heading_association_weight: float = 0.25
     cte_softening_m: float = 0.42
-    cte_gain: float = 0.34
-    path_lookahead_gain: float = 0.09
+    cte_gain: float = 0.0
+    path_lookahead_gain: float = 0.0
     alpha_min: float = 0.2
     alpha_curvature_half: float = 0.085
 
@@ -165,7 +165,7 @@ class RecommendedPurePursuitProfile:
 class RecommendedIsaacPurePursuitScript:
     """Script Editor 层推荐：限速、爬升 / 执行器限幅、打滑启发式。"""
 
-    version: str = "2026.05-mud-v7"
+    version: str = "2026.05-mud-v8"
     cruise_speed_mps: float = 0.85
     turn_speed_mps: float = 0.15
     slowdown_curvature: float = 0.11
@@ -367,98 +367,26 @@ class PurePursuitTracker:
     def compute(self, x: float, y: float, theta: float, v_mps: float) -> PurePursuitCommand:
         position = np.array([float(x), float(y)], dtype=float)
         goal = self.path[-1]
-        anchor_segment = self._last_segment_index
-        prev_point_early = self._point_at_progress(self._last_progress)
-        local_gate_dist = math.inf
-        if self._has_progress:
-            lp_min = max(0.0, self._last_progress - self.progress_search_behind)
-            lp_max = min(self.total_length, self._last_progress + self.progress_search_ahead)
-            local_prog = self._closest_progress(
-                position,
-                min_progress=lp_min,
-                max_progress=lp_max,
-                continuity=False,
-                heading=theta,
-                heading_weight_scale=0.12,
-            )
-            local_gate_dist = float(
-                np.linalg.norm(position - self._point_at_progress(local_prog))
-            )
-        widen_backward = (
-            self._has_progress
-            and self.total_length > 0.0
-            and (
-                local_gate_dist
-                > float(self.progress_relocalize_cte_m)
-                + max(float(self.progress_search_behind), float(self.progress_search_ahead))
-                or (
-                    float(self.progress_anchor_full_search_m) > 0.0
-                    and local_gate_dist > float(self.progress_anchor_full_search_m)
-                )
-            )
+        speed = float(v_mps)
+        lookahead = float(
+            np.clip(abs(speed) * self.lookahead_gain, self.min_lookahead, self.max_lookahead)
         )
+
         if self._has_progress:
-            if widen_backward:
-                min_progress = 0.0
-                max_progress = self.total_length
-            else:
-                min_progress = max(0.0, self._last_progress - self.progress_search_behind)
-                max_progress = min(self.total_length, self._last_progress + self.progress_search_ahead)
-            heading_w_scale = min(
-                1.0,
-                float(self.heading_association_far_scale_m) / max(local_gate_dist, 0.25),
-            )
-            guide_progress = self._closest_progress(
-                position,
-                min_progress=min_progress,
-                max_progress=max_progress,
-                continuity=False,
-                heading=theta,
-                heading_weight_scale=heading_w_scale,
-            )
+            search_ahead = max(float(self.progress_search_ahead), lookahead + 0.5)
             measured_progress = self._closest_progress(
                 position,
-                min_progress=min_progress,
-                max_progress=max_progress,
-                continuity=True,
-                continuity_anchor=anchor_segment,
-                guide_progress=guide_progress,
-                heading=theta,
-                heading_weight_scale=heading_w_scale,
+                min_progress=self._last_progress,
+                max_progress=min(self.total_length, self._last_progress + search_ahead),
+                continuity=False,
             )
+            closest_progress = max(self._last_progress, measured_progress)
         else:
-            measured_progress = self._closest_progress(position, continuity=False, heading=theta)
+            closest_progress = self._closest_progress(position, continuity=False)
             self._has_progress = True
 
-        prev_point = self._point_at_progress(self._last_progress)
-        prev_dist_sq = float(np.dot(position - prev_point, position - prev_point))
-        measured_point = self._point_at_progress(measured_progress)
-        measured_dist_sq = float(np.dot(position - measured_point, position - measured_point))
-        margin = float(self.progress_retrack_margin_m) ** 2
-        if measured_progress + 1e-9 < self._last_progress and measured_dist_sq + margin >= prev_dist_sq:
-            closest_progress = self._last_progress
-        else:
-            closest_progress = measured_progress
-
-        closest_chk = self._point_at_progress(closest_progress)
-        path_err_gate = float(np.linalg.norm(position - closest_chk))
-        ds_tr = 0.0
-        if self._last_xy is not None:
-            ds_tr = float(np.linalg.norm(position - self._last_xy))
-        spe_gate = self.phase_straight_end_progress
-        if (
-            spe_gate is not None
-            and path_err_gate > float(self.progress_stuck_path_err_m)
-            and ds_tr > 0.012
-            and abs(closest_progress - self._prev_closest_for_stuck) < 0.0025
-            and float(spe_gate) - 0.3 <= closest_progress <= float(spe_gate) + 8.0
-        ):
-            bump = min(float(self.progress_stuck_escape_m), max(0.09, 4.8 * ds_tr))
-            closest_progress = float(min(closest_progress + bump, self.total_length))
-        self._prev_closest_for_stuck = float(closest_progress)
-
-        self._last_xy = position.copy()
         closest_progress = float(np.clip(closest_progress, 0.0, self.total_length))
+        self._last_xy = position.copy()
         self._last_progress = closest_progress
         self._last_segment_index = int(
             min(max(np.searchsorted(self._cum_lengths, closest_progress, side="right") - 1, 0), len(self._segments) - 1)
@@ -477,35 +405,7 @@ class PurePursuitTracker:
                 closest_progress=closest_progress,
             )
 
-        speed = float(v_mps)
-        spe = self.phase_straight_end_progress
-        in_first_straight = spe is not None and closest_progress < float(spe) - 1e-6
-
-        lookahead0 = float(
-            np.clip(abs(speed) * self.lookahead_gain, self.min_lookahead, self.max_lookahead)
-        )
-        if in_first_straight:
-            # On the first long straight, classic PP ``2*y/L^2`` curvature reacts violently to
-            # small pose / rate noise and to inflated lookahead from ``path_lookahead_gain``
-            # near segment boundaries — the log ``k→1`` with ``progress≪straight_len`` case.
-            k_path = 0.0
-            lookahead = lookahead0
-        else:
-            k_path = self._path_curvature_estimate(closest_progress, lookahead0)
-            lookahead = float(
-                np.clip(
-                    lookahead0 * (1.0 + self.path_lookahead_gain * abs(k_path)),
-                    self.min_lookahead,
-                    self.max_lookahead,
-                )
-            )
         target_progress = min(closest_progress + lookahead, self.total_length)
-        # Only cap lookahead while we are *inside* the first straight (same condition as
-        # ``in_first_straight``). Using ``closest_progress <= spe`` here kept the lookahead
-        # stuck exactly *on the U-turn vertex* at progress ``spe``, giving zero PP curvature
-        # and "straight finished but never steers into the arc" in sim.
-        if in_first_straight and spe is not None:
-            target_progress = min(target_progress, float(spe))
         lookahead_point = self._point_at_progress(target_progress)
 
         dx, dy = lookahead_point - position
@@ -514,35 +414,7 @@ class PurePursuitTracker:
         x_body = cos_t * dx + sin_t * dy
         y_body = -sin_t * dx + cos_t * dy
         dist_sq = x_body * x_body + y_body * y_body
-        if in_first_straight:
-            curvature_geom = 0.0
-        else:
-            curvature_geom = 0.0 if dist_sq <= 1e-9 else 2.0 * y_body / dist_sq
-
-        path_heading = self._path_heading_at_progress(closest_progress)
-        heading_error = self._wrap_angle(path_heading - theta)
-        lookahead_distance = max(lookahead, self.min_lookahead)
-        heading_gain_eff = 0.0 if in_first_straight else self.heading_gain
-        curvature_heading = -heading_gain_eff * math.sin(heading_error) / lookahead_distance
-
-        tang = self._unit_tangent_at_progress(closest_progress)
-        closest_xy = self._point_at_progress(closest_progress)
-        err = position - closest_xy
-        cte_signed = float(tang[0] * err[1] - tang[1] * err[0])
-        denom = max(abs(speed) * lookahead_distance + self.cte_softening_m, 1e-3)
-        cte_gain_eff = (0.35 * self.cte_gain) if in_first_straight else self.cte_gain
-        path_err_cte = float(np.linalg.norm(err))
-        if (
-            not in_first_straight
-            and path_err_cte > float(self.cte_far_error_m)
-            and float(self.cte_gain_far_error_scale) > 1.0
-        ):
-            cte_gain_eff = float(
-                min(cte_gain_eff * float(self.cte_gain_far_error_scale), self.cte_gain * 3.0)
-            )
-        curvature_cte = (cte_gain_eff * cte_signed / denom) if cte_gain_eff > 0.0 else 0.0
-
-        curvature = 0.0 if in_first_straight else float(curvature_geom + curvature_heading + curvature_cte)
+        curvature = 0.0 if dist_sq <= 1e-9 else float(2.0 * y_body / dist_sq)
         max_curvature_geom = math.tan(self.max_steer) / self.wheelbase
         if self.max_lateral_accel_mps2 > 0.0 and abs(speed) > 0.08:
             max_curvature_lat = self.max_lateral_accel_mps2 / (speed * speed)
@@ -551,15 +423,9 @@ class PurePursuitTracker:
             max_curvature = max_curvature_geom
         curvature = float(np.clip(curvature, -max_curvature, max_curvature))
 
-        alpha_eff = float(self.alpha)
-        if self.alpha_min is not None:
-            cg = abs(curvature_geom)
-            w = min(cg / (cg + self.alpha_curvature_half), 1.0)
-            alpha_eff = float(self.alpha + (self.alpha_min - self.alpha) * w)
-
         # The robot is a rear-steering tricycle: front differential is only a
         # mild assist, never the primary turning mechanism in tight turns.
-        omega_diff = alpha_eff * curvature * speed
+        omega_diff = self.alpha * curvature * speed
         left_mps = speed - omega_diff * self.track_width / 2.0
         right_mps = speed + omega_diff * self.track_width / 2.0
         if not self.allow_reverse_wheels and speed >= 0.0:
