@@ -88,7 +88,7 @@ class RecommendedPurePursuitProfile:
     在「能跟住路径」与「少打滑、少抖舵」之间偏保守；调参只改这一处即可分叉版本。
     """
 
-    version: str = "2026.05-mud-v3"
+    version: str = "2026.05-mud-v5"
     friction_coupling: float = 0.48
     lookahead_gain: float = 1.0
     min_lookahead: float = 0.65
@@ -97,7 +97,13 @@ class RecommendedPurePursuitProfile:
     goal_tolerance: float = 0.3
     progress_search_behind: float = 1.0
     progress_search_ahead: float = 11.0
-    progress_anchor_full_search_m: float = 1.35
+    progress_anchor_full_search_m: float = 2.58
+    progress_tie_break_epsilon_m: float = 0.38
+    progress_stuck_path_err_m: float = 1.05
+    progress_stuck_escape_m: float = 0.42
+    heading_association_far_scale_m: float = 1.15
+    cte_gain_far_error_scale: float = 2.15
+    cte_far_error_m: float = 1.05
     heading_gain: float = 0.88
     segment_jump_hysteresis_m: float = 0.35
     segment_penalty_m: float = 0.85
@@ -134,6 +140,12 @@ class RecommendedPurePursuitProfile:
             "progress_search_behind": self.progress_search_behind,
             "progress_search_ahead": self.progress_search_ahead,
             "progress_anchor_full_search_m": self.progress_anchor_full_search_m,
+            "progress_tie_break_epsilon_m": self.progress_tie_break_epsilon_m,
+            "progress_stuck_path_err_m": self.progress_stuck_path_err_m,
+            "progress_stuck_escape_m": self.progress_stuck_escape_m,
+            "heading_association_far_scale_m": self.heading_association_far_scale_m,
+            "cte_gain_far_error_scale": self.cte_gain_far_error_scale,
+            "cte_far_error_m": self.cte_far_error_m,
             "heading_gain": self.heading_gain,
             "segment_jump_hysteresis_m": self.segment_jump_hysteresis_m,
             "segment_penalty_m": self.segment_penalty_m,
@@ -153,7 +165,7 @@ class RecommendedPurePursuitProfile:
 class RecommendedIsaacPurePursuitScript:
     """Script Editor 层推荐：限速、爬升 / 执行器限幅、打滑启发式。"""
 
-    version: str = "2026.05-mud-v3"
+    version: str = "2026.05-mud-v5"
     cruise_speed_mps: float = 0.85
     turn_speed_mps: float = 0.15
     slowdown_curvature: float = 0.11
@@ -223,7 +235,13 @@ class PurePursuitTracker:
         segment_penalty_m: float = 0.85,
         progress_retrack_margin_m: float = 0.12,
         progress_relocalize_cte_m: float = 1.05,
-        progress_anchor_full_search_m: float = 1.35,
+        progress_anchor_full_search_m: float = 2.58,
+        progress_tie_break_epsilon_m: float = 0.38,
+        progress_stuck_path_err_m: float = 1.05,
+        progress_stuck_escape_m: float = 0.42,
+        heading_association_far_scale_m: float = 1.15,
+        cte_gain_far_error_scale: float = 2.15,
+        cte_far_error_m: float = 1.05,
         heading_association_weight: float = 0.25,
         max_lateral_accel_mps2: float = 0.0,
         cte_gain: float = 0.0,
@@ -269,6 +287,16 @@ class PurePursuitTracker:
             raise ValueError("progress_relocalize_cte_m must be non-negative")
         if progress_anchor_full_search_m < 0:
             raise ValueError("progress_anchor_full_search_m must be non-negative (0 disables)")
+        if progress_tie_break_epsilon_m < 0:
+            raise ValueError("progress_tie_break_epsilon_m must be non-negative")
+        if progress_stuck_path_err_m <= 0 or progress_stuck_escape_m <= 0:
+            raise ValueError("stuck-escape distances must be positive")
+        if heading_association_far_scale_m <= 0:
+            raise ValueError("heading_association_far_scale_m must be positive")
+        if cte_gain_far_error_scale < 1.0:
+            raise ValueError("cte_gain_far_error_scale must be >= 1")
+        if cte_far_error_m <= 0:
+            raise ValueError("cte_far_error_m must be positive")
         if heading_association_weight < 0:
             raise ValueError("heading_association_weight must be non-negative")
         if max_lateral_accel_mps2 < 0:
@@ -305,6 +333,12 @@ class PurePursuitTracker:
         self.progress_retrack_margin_m = float(progress_retrack_margin_m)
         self.progress_relocalize_cte_m = float(progress_relocalize_cte_m)
         self.progress_anchor_full_search_m = float(progress_anchor_full_search_m)
+        self.progress_tie_break_epsilon_m = float(progress_tie_break_epsilon_m)
+        self.progress_stuck_path_err_m = float(progress_stuck_path_err_m)
+        self.progress_stuck_escape_m = float(progress_stuck_escape_m)
+        self.heading_association_far_scale_m = float(heading_association_far_scale_m)
+        self.cte_gain_far_error_scale = float(cte_gain_far_error_scale)
+        self.cte_far_error_m = float(cte_far_error_m)
         self.heading_association_weight = float(heading_association_weight)
         self.max_lateral_accel_mps2 = float(max_lateral_accel_mps2)
         self.cte_gain = float(cte_gain)
@@ -328,37 +362,59 @@ class PurePursuitTracker:
         self._has_progress = False
         self._last_segment_index = 0
         self._last_xy: np.ndarray | None = None
+        self._prev_closest_for_stuck = -1.0e9
 
     def compute(self, x: float, y: float, theta: float, v_mps: float) -> PurePursuitCommand:
         position = np.array([float(x), float(y)], dtype=float)
         goal = self.path[-1]
         anchor_segment = self._last_segment_index
         prev_point_early = self._point_at_progress(self._last_progress)
-        prev_dist_early = float(np.linalg.norm(position - prev_point_early))
+        local_gate_dist = math.inf
+        if self._has_progress:
+            lp_min = max(0.0, self._last_progress - self.progress_search_behind)
+            lp_max = min(self.total_length, self._last_progress + self.progress_search_ahead)
+            local_prog = self._closest_progress(
+                position,
+                min_progress=lp_min,
+                max_progress=lp_max,
+                continuity=False,
+                heading=theta,
+                heading_weight_scale=0.12,
+            )
+            local_gate_dist = float(
+                np.linalg.norm(position - self._point_at_progress(local_prog))
+            )
         widen_backward = (
             self._has_progress
             and self.total_length > 0.0
             and (
-                prev_dist_early
+                local_gate_dist
                 > float(self.progress_relocalize_cte_m)
                 + max(float(self.progress_search_behind), float(self.progress_search_ahead))
                 or (
                     float(self.progress_anchor_full_search_m) > 0.0
-                    and prev_dist_early > float(self.progress_anchor_full_search_m)
+                    and local_gate_dist > float(self.progress_anchor_full_search_m)
                 )
             )
         )
         if self._has_progress:
-            min_progress = max(0.0, self._last_progress - self.progress_search_behind)
-            max_progress = min(self.total_length, self._last_progress + self.progress_search_ahead)
             if widen_backward:
                 min_progress = 0.0
+                max_progress = self.total_length
+            else:
+                min_progress = max(0.0, self._last_progress - self.progress_search_behind)
+                max_progress = min(self.total_length, self._last_progress + self.progress_search_ahead)
+            heading_w_scale = min(
+                1.0,
+                float(self.heading_association_far_scale_m) / max(local_gate_dist, 0.25),
+            )
             guide_progress = self._closest_progress(
                 position,
                 min_progress=min_progress,
                 max_progress=max_progress,
                 continuity=False,
                 heading=theta,
+                heading_weight_scale=heading_w_scale,
             )
             measured_progress = self._closest_progress(
                 position,
@@ -368,6 +424,7 @@ class PurePursuitTracker:
                 continuity_anchor=anchor_segment,
                 guide_progress=guide_progress,
                 heading=theta,
+                heading_weight_scale=heading_w_scale,
             )
         else:
             measured_progress = self._closest_progress(position, continuity=False, heading=theta)
@@ -382,6 +439,23 @@ class PurePursuitTracker:
             closest_progress = self._last_progress
         else:
             closest_progress = measured_progress
+
+        closest_chk = self._point_at_progress(closest_progress)
+        path_err_gate = float(np.linalg.norm(position - closest_chk))
+        ds_tr = 0.0
+        if self._last_xy is not None:
+            ds_tr = float(np.linalg.norm(position - self._last_xy))
+        spe_gate = self.phase_straight_end_progress
+        if (
+            spe_gate is not None
+            and path_err_gate > float(self.progress_stuck_path_err_m)
+            and ds_tr > 0.012
+            and abs(closest_progress - self._prev_closest_for_stuck) < 0.0025
+            and float(spe_gate) - 0.3 <= closest_progress <= float(spe_gate) + 8.0
+        ):
+            bump = min(float(self.progress_stuck_escape_m), max(0.09, 4.8 * ds_tr))
+            closest_progress = float(min(closest_progress + bump, self.total_length))
+        self._prev_closest_for_stuck = float(closest_progress)
 
         self._last_xy = position.copy()
         closest_progress = float(np.clip(closest_progress, 0.0, self.total_length))
@@ -457,6 +531,15 @@ class PurePursuitTracker:
         cte_signed = float(tang[0] * err[1] - tang[1] * err[0])
         denom = max(abs(speed) * lookahead_distance + self.cte_softening_m, 1e-3)
         cte_gain_eff = (0.35 * self.cte_gain) if in_first_straight else self.cte_gain
+        path_err_cte = float(np.linalg.norm(err))
+        if (
+            not in_first_straight
+            and path_err_cte > float(self.cte_far_error_m)
+            and float(self.cte_gain_far_error_scale) > 1.0
+        ):
+            cte_gain_eff = float(
+                min(cte_gain_eff * float(self.cte_gain_far_error_scale), self.cte_gain * 3.0)
+            )
         curvature_cte = (cte_gain_eff * cte_signed / denom) if cte_gain_eff > 0.0 else 0.0
 
         curvature = float(curvature_geom + curvature_heading + curvature_cte)
@@ -505,6 +588,7 @@ class PurePursuitTracker:
         continuity_anchor: int | None = None,
         guide_progress: float | None = None,
         heading: float | None = None,
+        heading_weight_scale: float = 1.0,
     ) -> float:
         min_progress = float(np.clip(min_progress, 0.0, self.total_length))
         max_progress = self.total_length if max_progress is None else float(np.clip(max_progress, 0.0, self.total_length))
@@ -528,6 +612,10 @@ class PurePursuitTracker:
         best_score = math.inf
         best_progress = min_progress
         best_delta_prog = math.inf
+        best_geom_dist_sq = math.inf
+        tie_band_sq = float(self.progress_tie_break_epsilon_m) ** 2
+        tie_geom_min_sq = 0.88 * 0.88
+        hgw = float(heading_weight_scale)
 
         for index, segment in enumerate(self._segments):
             segment_start = float(self._cum_lengths[index])
@@ -559,7 +647,11 @@ class PurePursuitTracker:
             heading_cost = 0.0
             if heading is not None and self.heading_association_weight > 0.0:
                 heading_err = self._wrap_angle(segment_heading - float(heading))
-                heading_cost = float(self.heading_association_weight) * (1.0 - math.cos(heading_err))
+                heading_cost = (
+                    float(self.heading_association_weight)
+                    * hgw
+                    * (1.0 - math.cos(heading_err))
+                )
 
             loss_sq = dist_sq + penalty_sq + heading_cost
             delta_prog = abs(progress - ref_progress)
@@ -581,9 +673,16 @@ class PurePursuitTracker:
                 best_score = loss_sq
                 best_progress = progress
                 best_delta_prog = delta_prog
-            elif abs(loss_sq - best_score) <= 1e-9 and delta_prog + 1e-9 < best_delta_prog:
+                best_geom_dist_sq = dist_sq
+            elif (
+                dist_sq <= best_geom_dist_sq + tie_band_sq
+                and best_geom_dist_sq > tie_geom_min_sq
+                and progress + 1e-6 > best_progress
+            ):
                 best_progress = progress
+                best_score = loss_sq
                 best_delta_prog = delta_prog
+                best_geom_dist_sq = min(best_geom_dist_sq, dist_sq)
 
             for edge_t in (t_min, t_max):
                 edge_progress = float(segment_start + edge_t * seg_len)
@@ -600,7 +699,11 @@ class PurePursuitTracker:
                 heading_cost = 0.0
                 if heading is not None and self.heading_association_weight > 0.0:
                     heading_err = self._wrap_angle(segment_heading - float(heading))
-                    heading_cost = float(self.heading_association_weight) * (1.0 - math.cos(heading_err))
+                    heading_cost = (
+                        float(self.heading_association_weight)
+                        * hgw
+                        * (1.0 - math.cos(heading_err))
+                    )
 
                 loss_sq = edge_dist_sq + penalty_sq + heading_cost
                 delta_prog = abs(edge_progress - ref_progress)
@@ -622,9 +725,16 @@ class PurePursuitTracker:
                     best_score = loss_sq
                     best_progress = edge_progress
                     best_delta_prog = delta_prog
-                elif abs(loss_sq - best_score) <= 1e-9 and delta_prog + 1e-9 < best_delta_prog:
+                    best_geom_dist_sq = edge_dist_sq
+                elif (
+                    edge_dist_sq <= best_geom_dist_sq + tie_band_sq
+                    and best_geom_dist_sq > tie_geom_min_sq
+                    and edge_progress + 1e-6 > best_progress
+                ):
                     best_progress = edge_progress
+                    best_score = loss_sq
                     best_delta_prog = delta_prog
+                    best_geom_dist_sq = min(best_geom_dist_sq, edge_dist_sq)
 
         return best_progress
 

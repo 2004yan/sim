@@ -65,7 +65,9 @@ MAX_WHEEL_RAD_S = SC.max_wheel_rad_s
 MAX_WHEEL_ACCEL_RAD_S2 = SC.max_wheel_accel_rad_s2
 MAX_STEER_RAD = SC.max_steer_rad
 MAX_STEER_RATE_RAD_S = SC.max_steer_rate_rad_s
-ISAAC_REAR_STEER_SIGN = -1.0
+# Rear_Link 关节：正角绕 +Z 时 IMU/前向与 Pure Pursuit 的曲率符号应对齐。
+# 若仿真里首弯明显“朝反方向”削出台边，把下面改成 -1.0（二选一，无第三解）。
+ISAAC_REAR_STEER_SIGN = 1.0
 DYNAMIC_MARGIN_M = SC.dynamic_margin_m
 LOOKAHEAD_MIN_M = PP.min_lookahead
 LOOKAHEAD_MAX_M = PP.max_lookahead
