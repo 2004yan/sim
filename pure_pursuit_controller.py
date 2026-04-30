@@ -1,577 +1,655 @@
-"""Pure Pursuit path tracking for the 3-wheel paddy robot.
-
-This module is intentionally Isaac-independent. It converts a 2D path and the
-robot pose into front wheel angular velocities plus a rear steering target.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
 import math
-from typing import Iterable, Sequence
+from pathlib import Path
 
 import numpy as np
-
-
-# Estimates from Sim_Robot_V2.urdf.
-DEFAULT_TRACK_WIDTH = 1.2
-DEFAULT_WHEELBASE = 1.2
-DEFAULT_WHEEL_RADIUS = 0.235
-DEFAULT_STEER_SIGN = 1.0
-DEFAULT_FIELD_LENGTH = 30.0
-DEFAULT_FIELD_WIDTH = 3.0
-DEFAULT_SEMICIRCLE_COUNT = 9
-DEFAULT_MAIN_LANE_COUNT = 2
-DEFAULT_GROUND_SIZE = 20.0
-
-
-@dataclass(frozen=True)
-class PurePursuitCommand:
-    left_rad_s: float
-    right_rad_s: float
-    steer_rad: float
-    done: bool
-    lookahead_point: tuple[float, float]
-    curvature: float
-    closest_progress: float
-
-
-class PurePursuitTracker:
-    def __init__(
-        self,
-        path: Iterable[Sequence[float]],
-        *,
-        wheelbase: float = DEFAULT_WHEELBASE,
-        track_width: float = DEFAULT_TRACK_WIDTH,
-        wheel_radius: float = DEFAULT_WHEEL_RADIUS,
-        lookahead_gain: float = 1.0,
-        min_lookahead: float = 0.5,
-        max_lookahead: float = 2.0,
-        alpha: float = 0.5,
-        max_steer: float = math.pi / 2.0,
-        goal_tolerance: float = 0.2,
-        steer_sign: float = DEFAULT_STEER_SIGN,
-        allow_reverse_wheels: bool = False,
-        progress_search_behind: float = 1.0,
-        progress_search_ahead: float = math.inf,
-        heading_gain: float = 0.0,
-    ) -> None:
-        self.path = np.asarray(path, dtype=float)
-        if self.path.ndim != 2 or self.path.shape[1] != 2 or len(self.path) < 2:
-            raise ValueError("path must contain at least two 2D points")
-
-        if wheelbase <= 0:
-            raise ValueError("wheelbase must be positive")
-        if track_width <= 0:
-            raise ValueError("track_width must be positive")
-        if wheel_radius <= 0:
-            raise ValueError("wheel_radius must be positive")
-        if min_lookahead <= 0 or max_lookahead < min_lookahead:
-            raise ValueError("lookahead bounds must be positive and ordered")
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError("alpha must be in [0, 1]")
-        if max_steer <= 0:
-            raise ValueError("max_steer must be positive")
-        if goal_tolerance < 0:
-            raise ValueError("goal_tolerance must be non-negative")
-        if steer_sign not in (-1.0, 1.0):
-            raise ValueError("steer_sign must be 1.0 or -1.0")
-        if progress_search_behind < 0:
-            raise ValueError("progress_search_behind must be non-negative")
-        if progress_search_ahead <= 0:
-            raise ValueError("progress_search_ahead must be positive")
-        if heading_gain < 0:
-            raise ValueError("heading_gain must be non-negative")
-
-        self.wheelbase = float(wheelbase)
-        self.track_width = float(track_width)
-        self.wheel_radius = float(wheel_radius)
-        self.lookahead_gain = float(lookahead_gain)
-        self.min_lookahead = float(min_lookahead)
-        self.max_lookahead = float(max_lookahead)
-        self.alpha = float(alpha)
-        self.max_steer = float(max_steer)
-        self.goal_tolerance = float(goal_tolerance)
-        self.steer_sign = float(steer_sign)
-        self.allow_reverse_wheels = bool(allow_reverse_wheels)
-        self.progress_search_behind = float(progress_search_behind)
-        self.progress_search_ahead = float(progress_search_ahead)
-        self.heading_gain = float(heading_gain)
-
-        self._segments = self.path[1:] - self.path[:-1]
-        self._segment_lengths = np.linalg.norm(self._segments, axis=1)
-        if np.any(self._segment_lengths <= 0):
-            raise ValueError("path segments must have non-zero length")
-        self._cum_lengths = np.concatenate(([0.0], np.cumsum(self._segment_lengths)))
-        self.total_length = float(self._cum_lengths[-1])
-        self._last_progress = 0.0
-        self._has_progress = False
-
-    def compute(self, x: float, y: float, theta: float, v_mps: float) -> PurePursuitCommand:
-        position = np.array([float(x), float(y)], dtype=float)
-        goal = self.path[-1]
-        if self._has_progress:
-            min_progress = max(0.0, self._last_progress - self.progress_search_behind)
-            max_progress = min(self.total_length, self._last_progress + self.progress_search_ahead)
-            measured_progress = self._closest_progress(
-                position,
-                min_progress=min_progress,
-                max_progress=max_progress,
-            )
-        else:
-            measured_progress = self._closest_progress(position)
-            self._has_progress = True
-        closest_progress = max(measured_progress, self._last_progress)
-        self._last_progress = closest_progress
-
-        reached_goal_position = np.linalg.norm(position - goal) <= self.goal_tolerance
-        reached_goal_progress = (self.total_length - closest_progress) <= self.goal_tolerance
-        if reached_goal_position and reached_goal_progress:
-            return PurePursuitCommand(
-                left_rad_s=0.0,
-                right_rad_s=0.0,
-                steer_rad=0.0,
-                done=True,
-                lookahead_point=(float(goal[0]), float(goal[1])),
-                curvature=0.0,
-                closest_progress=closest_progress,
-            )
-
-        speed = float(v_mps)
-        lookahead = float(
-            np.clip(abs(speed) * self.lookahead_gain, self.min_lookahead, self.max_lookahead)
-        )
-        target_progress = min(closest_progress + lookahead, self.total_length)
-        lookahead_point = self._point_at_progress(target_progress)
-
-        dx, dy = lookahead_point - position
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        x_body = cos_t * dx + sin_t * dy
-        y_body = -sin_t * dx + cos_t * dy
-        dist_sq = x_body * x_body + y_body * y_body
-        curvature_geom = 0.0 if dist_sq <= 1e-9 else 2.0 * y_body / dist_sq
-
-        path_heading = self._path_heading_at_progress(closest_progress)
-        heading_error = self._wrap_angle(path_heading - theta)
-        lookahead_distance = max(lookahead, self.min_lookahead)
-        curvature_heading = -self.heading_gain * math.sin(heading_error) / lookahead_distance
-        curvature = float(curvature_geom + curvature_heading)
-        max_curvature = math.tan(self.max_steer) / self.wheelbase
-        curvature = float(np.clip(curvature, -max_curvature, max_curvature))
-
-        # The robot is a rear-steering tricycle: front differential is only a
-        # mild assist, never the primary turning mechanism in tight turns.
-        omega_diff = self.alpha * curvature * speed
-        left_mps = speed - omega_diff * self.track_width / 2.0
-        right_mps = speed + omega_diff * self.track_width / 2.0
-        if not self.allow_reverse_wheels and speed >= 0.0:
-            left_mps = max(left_mps, 0.0)
-            right_mps = max(right_mps, 0.0)
-        steer = self.steer_sign * math.atan(curvature * self.wheelbase)
-        steer = float(np.clip(steer, -self.max_steer, self.max_steer))
-
-        return PurePursuitCommand(
-            left_rad_s=left_mps / self.wheel_radius,
-            right_rad_s=right_mps / self.wheel_radius,
-            steer_rad=steer,
-            done=False,
-            lookahead_point=(float(lookahead_point[0]), float(lookahead_point[1])),
-            curvature=float(curvature),
-            closest_progress=closest_progress,
-        )
-
-    def _closest_progress(
-        self,
-        position: np.ndarray,
-        *,
-        min_progress: float = 0.0,
-        max_progress: float | None = None,
-    ) -> float:
-        min_progress = float(np.clip(min_progress, 0.0, self.total_length))
-        max_progress = self.total_length if max_progress is None else float(np.clip(max_progress, 0.0, self.total_length))
-        if max_progress < min_progress:
-            min_progress, max_progress = max_progress, min_progress
-
-        best_dist_sq = math.inf
-        best_progress = min_progress
-
-        for index, segment in enumerate(self._segments):
-            segment_start = float(self._cum_lengths[index])
-            segment_end = float(self._cum_lengths[index + 1])
-            seg_len = float(self._segment_lengths[index])
-            start = self.path[index]
-
-            if segment_end < min_progress or segment_start > max_progress:
-                continue
-
-            t_min = float(np.clip((min_progress - segment_start) / seg_len, 0.0, 1.0))
-            t_max = float(np.clip((max_progress - segment_start) / seg_len, 0.0, 1.0))
-            if t_min > t_max:
-                t_min, t_max = t_max, t_min
-
-            t_raw = float(np.dot(position - start, segment) / (seg_len * seg_len))
-            t = float(np.clip(t_raw, t_min, t_max))
-            progress = float(segment_start + t * seg_len)
-            projection = start + t * segment
-            dist_sq = float(np.dot(position - projection, position - projection))
-            if dist_sq < best_dist_sq:
-                best_dist_sq = dist_sq
-                best_progress = progress
-
-            for edge_t in (t_min, t_max):
-                edge_progress = float(segment_start + edge_t * seg_len)
-                edge_point = start + edge_t * segment
-                edge_dist_sq = float(np.dot(position - edge_point, position - edge_point))
-                if edge_dist_sq < best_dist_sq:
-                    best_dist_sq = edge_dist_sq
-                    best_progress = edge_progress
-
-        return best_progress
-
-    def _path_heading_at_progress(self, progress: float) -> float:
-        progress = float(np.clip(progress, 0.0, self.total_length))
-        if progress >= self.total_length - 1e-9:
-            tangent = self._segments[-1]
-        else:
-            index = int(np.searchsorted(self._cum_lengths, progress, side="right") - 1)
-            index = min(index, len(self._segments) - 1)
-            tangent = self._segments[index]
-        return float(math.atan2(float(tangent[1]), float(tangent[0])))
-
-    @staticmethod
-    def _wrap_angle(angle: float) -> float:
-        return (angle + math.pi) % (2.0 * math.pi) - math.pi
-
-    def _point_at_progress(self, progress: float) -> np.ndarray:
-        progress = float(np.clip(progress, 0.0, self.total_length))
-        if progress >= self.total_length:
-            return self.path[-1].copy()
-
-        index = int(np.searchsorted(self._cum_lengths, progress, side="right") - 1)
-        index = min(index, len(self._segments) - 1)
-        segment_start = self._cum_lengths[index]
-        t = (progress - segment_start) / self._segment_lengths[index]
-        return self.path[index] + t * self._segments[index]
-
-
-def yaw_from_quat(quat: Sequence[float]) -> float:
-    """Return yaw from an Isaac-style quaternion tuple ordered as (w, x, y, z)."""
-    w, x, y, z = quat
-    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-
-
-def quat_from_yaw(theta: float) -> tuple[float, float, float, float]:
-    """Return an Isaac-style quaternion tuple ordered as (w, x, y, z)."""
-    half = theta / 2.0
-    return (float(math.cos(half)), 0.0, 0.0, float(math.sin(half)))
-
-
-def generate_lawnmower_path(
-    *,
-    field_length: float = DEFAULT_FIELD_LENGTH,
-    field_width: float = DEFAULT_FIELD_WIDTH,
-    semicircle_count: int = DEFAULT_SEMICIRCLE_COUNT,
-    turn_samples: int = 13,
-) -> list[tuple[float, float]]:
-    """Generate a 30m x 3m-style coverage path with alternating semicircle turns.
-
-    Coordinates follow the planning sketch: start at the upper-left corner,
-    drive along the field length, then use headland semicircles to step down.
-    """
-    if field_length <= 0:
-        raise ValueError("field_length must be positive")
-    if field_width <= 0:
-        raise ValueError("field_width must be positive")
-    if semicircle_count <= 0:
-        raise ValueError("semicircle_count must be positive")
-    if turn_samples < 2:
-        raise ValueError("turn_samples must be at least 2")
-
-    lane_spacing = field_width / float(semicircle_count)
-    turn_radius = lane_spacing / 2.0
-    path: list[tuple[float, float]] = [(0.0, float(field_width))]
-
-    for turn_index in range(semicircle_count):
-        y_top = field_width - turn_index * lane_spacing
-        y_bottom = y_top - lane_spacing
-        going_right = turn_index % 2 == 0
-        straight_end_x = field_length if going_right else 0.0
-        side_sign = 1.0 if going_right else -1.0
-        center_x = straight_end_x
-        center_y = y_top - turn_radius
-
-        _append_unique(path, (straight_end_x, y_top))
-        for angle in np.linspace(math.pi / 2.0, -math.pi / 2.0, turn_samples):
-            x = center_x + side_sign * turn_radius * math.cos(float(angle))
-            y = center_y + turn_radius * math.sin(float(angle))
-            _append_unique(path, (x, y))
-        _append_unique(path, (straight_end_x, y_bottom))
-
-    final_x = field_length if semicircle_count % 2 == 1 else 0.0
-    _append_unique(path, (final_x, 0.0))
-    return path
-
-
-def generate_main_lane_path(
-    *,
-    field_length: float = DEFAULT_FIELD_LENGTH,
-    field_width: float = DEFAULT_FIELD_WIDTH,
-    lane_count: int = DEFAULT_MAIN_LANE_COUNT,
-    turn_samples: int = 25,
-) -> list[tuple[float, float]]:
-    """Generate a feasible demo path with 2 or 3 main vehicle-center lanes."""
-    if field_length <= 0:
-        raise ValueError("field_length must be positive")
-    if field_width <= 0:
-        raise ValueError("field_width must be positive")
-    if lane_count < 2:
-        raise ValueError("lane_count must be at least 2")
-    if turn_samples < 2:
-        raise ValueError("turn_samples must be at least 2")
-
-    lane_spacing = field_width / float(lane_count - 1)
-    turn_radius = lane_spacing / 2.0
-    path: list[tuple[float, float]] = [(0.0, float(field_width))]
-
-    for turn_index in range(lane_count - 1):
-        y_top = field_width - turn_index * lane_spacing
-        y_bottom = y_top - lane_spacing
-        going_right = turn_index % 2 == 0
-        straight_end_x = field_length if going_right else 0.0
-        side_sign = 1.0 if going_right else -1.0
-        center_y = y_top - turn_radius
-
-        _append_unique(path, (straight_end_x, y_top))
-        for angle in np.linspace(math.pi / 2.0, -math.pi / 2.0, turn_samples):
-            x = straight_end_x + side_sign * turn_radius * math.cos(float(angle))
-            y = center_y + turn_radius * math.sin(float(angle))
-            _append_unique(path, (x, y))
-        _append_unique(path, (straight_end_x, y_bottom))
-
-    final_x = field_length if lane_count % 2 == 1 else 0.0
-    _append_unique(path, (final_x, 0.0))
-    return path
-
-
-def transform_path_to_pose(
-    path: Iterable[Sequence[float]],
-    *,
-    x: float,
-    y: float,
-    theta: float,
-) -> list[tuple[float, float]]:
-    """Move a local path so its first point starts at the robot pose."""
-    points = np.asarray(path, dtype=float)
-    if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
-        raise ValueError("path must contain at least two 2D points")
-
-    local_start = points[0].copy()
-    cos_t = math.cos(theta)
-    sin_t = math.sin(theta)
-    anchored: list[tuple[float, float]] = []
-    for point in points:
-        dx, dy = point - local_start
-        world_x = x + cos_t * dx - sin_t * dy
-        world_y = y + sin_t * dx + cos_t * dy
-        anchored.append((float(world_x), float(world_y)))
-    return anchored
-
-
-def clamp_field_length_to_ground(
-    *,
-    x: float,
-    y: float,
-    theta: float,
-    requested_length: float,
-    turn_radius: float,
-    ground_size: float = DEFAULT_GROUND_SIZE,
-    margin: float = 1.0,
-    min_length: float = 2.0,
-    dynamic_margin: float = 0.0,
-    vehicle_half_length: float = 0.0,
-) -> float:
-    """Clamp forward path length so the far turn stays inside a square ground plane."""
-    if requested_length <= 0:
-        raise ValueError("requested_length must be positive")
-    if turn_radius < 0:
-        raise ValueError("turn_radius must be non-negative")
-    if ground_size <= 0:
-        raise ValueError("ground_size must be positive")
-    if margin < 0:
-        raise ValueError("margin must be non-negative")
-    if min_length <= 0:
-        raise ValueError("min_length must be positive")
-    if dynamic_margin < 0:
-        raise ValueError("dynamic_margin must be non-negative")
-    if vehicle_half_length < 0:
-        raise ValueError("vehicle_half_length must be non-negative")
-
-    half = ground_size / 2.0
-    dx = math.cos(theta)
-    dy = math.sin(theta)
-    distances: list[float] = []
-    if dx > 1e-9:
-        distances.append((half - x) / dx)
-    elif dx < -1e-9:
-        distances.append((-half - x) / dx)
-    if dy > 1e-9:
-        distances.append((half - y) / dy)
-    elif dy < -1e-9:
-        distances.append((-half - y) / dy)
-
-    forward_to_edge = min((distance for distance in distances if distance > 0.0), default=requested_length)
-    forward_extent = turn_radius + vehicle_half_length
-    usable_length = forward_to_edge - margin - dynamic_margin - forward_extent
-    return float(np.clip(usable_length, min_length, requested_length))
-
-
-def compute_platform_corner_start_pose(
-    *,
-    ground_size: float = DEFAULT_GROUND_SIZE,
-    field_width: float = DEFAULT_FIELD_WIDTH,
-    lane_count: int = DEFAULT_MAIN_LANE_COUNT,
-    track_width: float = DEFAULT_TRACK_WIDTH,
-    wheelbase: float = DEFAULT_WHEELBASE,
-    wheel_radius: float = DEFAULT_WHEEL_RADIUS,
-    margin: float = 1.0,
-    dynamic_margin: float = 0.0,
-    theta: float = 0.0,
-) -> tuple[float, float, float]:
-    """Choose an upper-left platform start pose with vehicle and turn clearance."""
-    if ground_size <= 0:
-        raise ValueError("ground_size must be positive")
-    if field_width <= 0:
-        raise ValueError("field_width must be positive")
-    if lane_count < 2:
-        raise ValueError("lane_count must be at least 2")
-    if track_width <= 0 or wheelbase <= 0 or wheel_radius <= 0:
-        raise ValueError("vehicle dimensions must be positive")
-    if margin < 0:
-        raise ValueError("margin must be non-negative")
-    if dynamic_margin < 0:
-        raise ValueError("dynamic_margin must be non-negative")
-
-    half = ground_size / 2.0
-    lane_spacing = field_width / float(lane_count - 1)
-    turn_radius = lane_spacing / 2.0
-    vehicle_half_width = (track_width + 2.0 * wheel_radius) / 2.0
-    vehicle_half_length = (wheelbase + 2.0 * wheel_radius) / 2.0
-
-    x = -half + margin + dynamic_margin + max(vehicle_half_length, turn_radius)
-    y = half - margin - dynamic_margin - vehicle_half_width
-    return (float(x), float(y), float(theta))
-
-
-def speed_from_curvature(
-    curvature: float,
-    *,
-    cruise_speed: float = 1.2,
-    turn_speed: float = 0.25,
-    slowdown_curvature: float = 0.8,
-    straight_curvature_deadband: float = 0.0,
-) -> float:
-    """Choose a target speed: fast on straight segments, slow in tight turns."""
-    if cruise_speed <= 0:
-        raise ValueError("cruise_speed must be positive")
-    if turn_speed <= 0:
-        raise ValueError("turn_speed must be positive")
-    if turn_speed > cruise_speed:
-        raise ValueError("turn_speed must not exceed cruise_speed")
-    if slowdown_curvature <= 0:
-        raise ValueError("slowdown_curvature must be positive")
-    if straight_curvature_deadband < 0:
-        raise ValueError("straight_curvature_deadband must be non-negative")
-
-    effective_curvature = max(abs(curvature) - straight_curvature_deadband, 0.0)
-    ratio = min(effective_curvature / slowdown_curvature, 1.0)
-    return float(cruise_speed - (cruise_speed - turn_speed) * ratio)
-
-
-def apply_command(bot, command: PurePursuitCommand) -> None:
-    """Apply a computed command to PaddyRobotController-like objects."""
-    bot.set_wheel_speeds(command.left_rad_s, command.right_rad_s)
-    bot.set_steering_angle(command.steer_rad)
-
-
-def limit_actuator_command(
-    command: PurePursuitCommand,
-    previous: PurePursuitCommand,
-    *,
-    step_size: float,
-    max_wheel_rad_s: float,
-    max_wheel_accel_rad_s2: float,
-    max_steer_rad: float,
-    max_steer_rate_rad_s: float,
-) -> PurePursuitCommand:
-    """Clamp wheel and steering commands like Isaac wheeled controllers do."""
-    if step_size <= 0:
-        raise ValueError("step_size must be positive")
-    if max_wheel_rad_s <= 0 or max_wheel_accel_rad_s2 <= 0:
-        raise ValueError("wheel limits must be positive")
-    if max_steer_rad <= 0 or max_steer_rate_rad_s <= 0:
-        raise ValueError("steering limits must be positive")
-
-    left = _rate_limit(
-        current=previous.left_rad_s,
-        target=float(np.clip(command.left_rad_s, -max_wheel_rad_s, max_wheel_rad_s)),
-        max_delta=max_wheel_accel_rad_s2 * step_size,
-    )
-    right = _rate_limit(
-        current=previous.right_rad_s,
-        target=float(np.clip(command.right_rad_s, -max_wheel_rad_s, max_wheel_rad_s)),
-        max_delta=max_wheel_accel_rad_s2 * step_size,
-    )
-    steer = _rate_limit(
-        current=previous.steer_rad,
-        target=float(np.clip(command.steer_rad, -max_steer_rad, max_steer_rad)),
-        max_delta=max_steer_rate_rad_s * step_size,
+import pytest
+
+from pure_pursuit_controller import (
+    DEFAULT_STEER_SIGN,
+    DEFAULT_TRACK_WIDTH,
+    DEFAULT_WHEEL_RADIUS,
+    DEFAULT_WHEELBASE,
+    GRAVITY_MPS2,
+    PurePursuitCommand,
+    PurePursuitTracker,
+    apply_command,
+    clamp_field_length_to_ground,
+    compute_platform_corner_start_pose,
+    generate_main_lane_path,
+    generate_lawnmower_path,
+    limit_actuator_command,
+    quat_from_yaw,
+    recommended_max_lateral_accel_mps2,
+    speed_from_curvature,
+    transform_path_to_pose,
+    yaw_from_quat,
+)
+from pure_pursuit_validation import simulate_path
+
+
+def test_straight_path_outputs_equal_wheel_speeds_and_zero_steer():
+    tracker = PurePursuitTracker(
+        [(0.0, 0.0), (5.0, 0.0)],
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        lookahead_gain=1.0,
+        min_lookahead=1.0,
+        max_lookahead=1.0,
+        alpha=0.5,
     )
 
-    return PurePursuitCommand(
-        left_rad_s=left,
-        right_rad_s=right,
-        steer_rad=steer,
-        done=command.done,
-        lookahead_point=command.lookahead_point,
-        curvature=command.curvature,
-        closest_progress=command.closest_progress,
+    cmd = tracker.compute(x=0.0, y=0.0, theta=0.0, v_mps=1.0)
+
+    assert cmd.done is False
+    assert cmd.lookahead_point == pytest.approx((1.0, 0.0))
+    assert cmd.curvature == pytest.approx(0.0)
+    assert cmd.left_rad_s == pytest.approx(4.0)
+    assert cmd.right_rad_s == pytest.approx(4.0)
+    assert cmd.steer_rad == pytest.approx(0.0)
+
+
+def test_lateral_offset_uses_body_frame_distance_and_rear_steering_geometry():
+    tracker = PurePursuitTracker(
+        np.array([(0.0, 0.0), (5.0, 0.0)]),
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        lookahead_gain=1.0,
+        min_lookahead=1.0,
+        max_lookahead=1.0,
+        alpha=0.5,
+    )
+
+    cmd = tracker.compute(x=0.0, y=1.0, theta=0.0, v_mps=1.0)
+
+    assert cmd.lookahead_point == pytest.approx((1.0, 0.0))
+    assert cmd.curvature == pytest.approx(-1.0)
+    assert cmd.left_rad_s == pytest.approx(5.2)
+    assert cmd.right_rad_s == pytest.approx(2.8)
+    assert cmd.steer_rad == pytest.approx(math.atan(-1.2))
+
+
+def test_curvature_is_limited_by_rear_steering_capability():
+    tracker = PurePursuitTracker(
+        np.array([(0.0, 0.0), (5.0, 0.0)]),
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        min_lookahead=0.6,
+        max_lookahead=0.6,
+        max_steer=math.radians(50.0),
+    )
+
+    cmd = tracker.compute(x=0.0, y=1.0, theta=0.0, v_mps=0.15)
+    max_curvature = math.tan(math.radians(50.0)) / 1.2
+
+    assert abs(cmd.curvature) <= max_curvature
+    assert cmd.left_rad_s >= 0.0
+    assert cmd.right_rad_s >= 0.0
+
+
+def test_finished_path_reports_done_and_zero_commands_near_goal():
+    tracker = PurePursuitTracker(
+        [(0.0, 0.0), (1.0, 0.0)],
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        goal_tolerance=0.2,
+    )
+
+    cmd = tracker.compute(x=0.95, y=0.0, theta=0.0, v_mps=1.0)
+
+    assert cmd.done is True
+    assert cmd.left_rad_s == pytest.approx(0.0)
+    assert cmd.right_rad_s == pytest.approx(0.0)
+    assert cmd.steer_rad == pytest.approx(0.0)
+
+
+def test_near_goal_position_does_not_finish_until_path_progress_reaches_end():
+    tracker = PurePursuitTracker(
+        [(0.0, 0.0), (5.0, 0.0), (0.1, 0.0)],
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        min_lookahead=1.0,
+        max_lookahead=1.0,
+        goal_tolerance=0.2,
+    )
+
+    cmd = tracker.compute(x=0.0, y=0.0, theta=0.0, v_mps=1.0)
+
+    assert cmd.done is False
+
+
+def test_rejects_invalid_geometry_and_path_inputs():
+    with pytest.raises(ValueError, match="at least two"):
+        PurePursuitTracker([(0.0, 0.0)])
+
+    with pytest.raises(ValueError, match="wheel_radius"):
+        PurePursuitTracker([(0.0, 0.0), (1.0, 0.0)], wheel_radius=0.0)
+
+
+def test_apply_command_sends_front_wheel_speeds_and_rear_steering_only():
+    class FakeBot:
+        def __init__(self):
+            self.wheels = None
+            self.steer = None
+            self.rear = None
+
+        def set_wheel_speeds(self, left_rad_s, right_rad_s):
+            self.wheels = (left_rad_s, right_rad_s)
+
+        def set_steering_angle(self, angle_rad):
+            self.steer = angle_rad
+
+        def set_rear_wheel_speed(self, rad_s):
+            self.rear = rad_s
+
+    bot = FakeBot()
+    cmd = PurePursuitCommand(
+        left_rad_s=1.2,
+        right_rad_s=1.8,
+        steer_rad=0.3,
+        done=False,
+        lookahead_point=(1.0, 0.0),
+        curvature=0.2,
+        closest_progress=0.0,
+    )
+
+    apply_command(bot, cmd)
+
+    assert bot.wheels == pytest.approx((1.2, 1.8))
+    assert bot.steer == pytest.approx(0.3)
+    assert bot.rear is None
+
+
+def test_robot_setup_leaves_rear_wheel_as_passive_free_rolling_joint():
+    setup = Path(__file__).resolve().parents[1] / "robot_setup.py"
+    text = setup.read_text(encoding="utf-8")
+
+    assert "_disable_drive(REAR_WHEEL_JOINT)" in text
+    assert "_set_drive(REAR_WHEEL_JOINT, stiffness=0,   damping=1e4)" not in text
+    assert 'f"{BASE}/Rear_Link_Link": 10.0' in text
+    assert "FRONT_WHEEL_DAMPING = 1500.0" in text
+    assert "FRONT_WHEEL_MAX_FORCE = 300.0" in text
+    assert "REAR_STEER_STIFFNESS = 2e4" in text
+    assert "REAR_STEER_DAMPING = 800.0" in text
+    assert "REAR_STEER_MAX_FORCE = 300.0" in text
+
+
+def test_ground_setup_uses_validation_friction_for_turning_debug():
+    ground = Path(__file__).resolve().parents[1] / "ground_setup.py"
+    text = ground.read_text(encoding="utf-8")
+
+    assert "static_friction=0.6" in text
+    assert "dynamic_friction=0.45" in text
+
+
+def test_runtime_controller_does_not_reapply_articulation_root():
+    controller = Path(__file__).resolve().parents[1] / "controller.py"
+    text = controller.read_text(encoding="utf-8")
+
+    assert "UsdPhysics.ArticulationRootAPI.Apply(prim)" not in text
+
+
+def test_limit_actuator_command_clamps_wheel_speed_and_steering_rate():
+    previous = PurePursuitCommand(
+        left_rad_s=0.0,
+        right_rad_s=0.0,
+        steer_rad=0.0,
+        done=False,
+        lookahead_point=(0.0, 0.0),
+        curvature=0.0,
+        closest_progress=0.0,
+    )
+    raw = PurePursuitCommand(
+        left_rad_s=20.0,
+        right_rad_s=-20.0,
+        steer_rad=1.0,
+        done=False,
+        lookahead_point=(1.0, 0.0),
+        curvature=2.0,
+        closest_progress=1.0,
+    )
+
+    limited = limit_actuator_command(
+        raw,
+        previous,
+        step_size=0.1,
+        max_wheel_rad_s=6.0,
+        max_wheel_accel_rad_s2=10.0,
+        max_steer_rad=0.5,
+        max_steer_rate_rad_s=1.0,
+    )
+
+    assert limited.left_rad_s == pytest.approx(1.0)
+    assert limited.right_rad_s == pytest.approx(-1.0)
+    assert limited.steer_rad == pytest.approx(0.1)
+    assert limited.lookahead_point == raw.lookahead_point
+    assert limited.curvature == raw.curvature
+
+
+def test_default_geometry_matches_urdf_estimates():
+    assert DEFAULT_TRACK_WIDTH == pytest.approx(1.2)
+    assert DEFAULT_WHEELBASE == pytest.approx(1.2)
+    assert DEFAULT_WHEEL_RADIUS == pytest.approx(0.235, abs=0.001)
+    assert DEFAULT_STEER_SIGN == 1.0
+
+
+def test_generate_lawnmower_path_matches_30_by_3_field_geometry():
+    path = generate_lawnmower_path(
+        field_length=30.0,
+        field_width=3.0,
+        semicircle_count=9,
+        turn_samples=7,
+    )
+
+    assert len(path) == 64
+    assert path[0] == pytest.approx((0.0, 3.0))
+    assert path[-1] == pytest.approx((30.0, 0.0))
+    assert path[1] == pytest.approx((30.0, 3.0))
+    assert path[7] == pytest.approx((30.0, 3.0 - 1.0 / 3.0))
+    assert path[8] == pytest.approx((0.0, 3.0 - 1.0 / 3.0))
+    assert max(x for x, _ in path) == pytest.approx(30.0 + 1.0 / 6.0)
+    assert min(x for x, _ in path) == pytest.approx(-1.0 / 6.0)
+
+
+def test_generate_lawnmower_path_rejects_invalid_field_geometry():
+    with pytest.raises(ValueError, match="semicircle_count"):
+        generate_lawnmower_path(semicircle_count=0)
+
+    with pytest.raises(ValueError, match="turn_samples"):
+        generate_lawnmower_path(turn_samples=1)
+
+
+def test_generate_main_lane_path_supports_two_or_three_feasible_lanes():
+    two_lane = generate_main_lane_path(field_length=30.0, field_width=3.0, lane_count=2, turn_samples=7)
+    three_lane = generate_main_lane_path(field_length=30.0, field_width=3.0, lane_count=3, turn_samples=7)
+
+    assert two_lane[0] == pytest.approx((0.0, 3.0))
+    assert two_lane[-1] == pytest.approx((0.0, 0.0))
+    assert max(x for x, _ in two_lane) == pytest.approx(31.5)
+
+    assert len(three_lane) == 16
+    assert three_lane[0] == pytest.approx((0.0, 3.0))
+    assert three_lane[1] == pytest.approx((30.0, 3.0))
+    assert three_lane[7] == pytest.approx((30.0, 1.5))
+    assert three_lane[8] == pytest.approx((0.0, 1.5))
+    assert three_lane[-1] == pytest.approx((30.0, 0.0))
+    assert max(x for x, _ in three_lane) == pytest.approx(30.75)
+    assert min(x for x, _ in three_lane) == pytest.approx(-0.75)
+
+
+def test_generate_main_lane_path_rejects_unusable_lane_counts():
+    with pytest.raises(ValueError, match="lane_count"):
+        generate_main_lane_path(lane_count=1)
+
+
+def test_clamp_field_length_keeps_path_on_20m_ground_plane():
+    assert clamp_field_length_to_ground(
+        x=0.0,
+        y=0.0,
+        theta=0.0,
+        requested_length=30.0,
+        turn_radius=1.5,
+        ground_size=20.0,
+        margin=1.0,
+    ) == pytest.approx(7.5)
+
+    assert clamp_field_length_to_ground(
+        x=-8.0,
+        y=0.0,
+        theta=0.0,
+        requested_length=30.0,
+        turn_radius=1.5,
+        ground_size=20.0,
+        margin=1.0,
+    ) == pytest.approx(15.5)
+
+
+def test_path_geometry_can_reserve_dynamic_vehicle_clearance():
+    x, y, theta = compute_platform_corner_start_pose(
+        ground_size=20.0,
+        field_width=5.0,
+        lane_count=2,
+        track_width=1.2,
+        wheelbase=1.2,
+        wheel_radius=0.235,
+        margin=1.0,
+        dynamic_margin=0.5,
+    )
+    length = clamp_field_length_to_ground(
+        x=x,
+        y=y,
+        theta=theta,
+        requested_length=30.0,
+        turn_radius=2.5,
+        ground_size=20.0,
+        margin=1.0,
+        dynamic_margin=0.5,
+        vehicle_half_length=(1.2 + 2.0 * 0.235) / 2.0,
+    )
+
+    assert x == pytest.approx(-6.0)
+    assert y == pytest.approx(7.665)
+    assert length == pytest.approx(11.165)
+
+
+def test_speed_from_curvature_runs_fast_on_straights_and_slow_in_turns():
+    assert speed_from_curvature(0.0, cruise_speed=1.2, turn_speed=0.25) == pytest.approx(1.2)
+    assert speed_from_curvature(
+        0.05,
+        cruise_speed=1.2,
+        turn_speed=0.25,
+        straight_curvature_deadband=0.08,
+    ) == pytest.approx(1.2)
+    assert speed_from_curvature(2.0, cruise_speed=1.2, turn_speed=0.25) == pytest.approx(0.25)
+    assert 0.25 < speed_from_curvature(0.4, cruise_speed=1.2, turn_speed=0.25) < 1.2
+
+
+def test_compute_platform_corner_start_pose_respects_vehicle_and_turn_clearance():
+    x, y, theta = compute_platform_corner_start_pose(
+        ground_size=20.0,
+        field_width=3.0,
+        lane_count=2,
+        track_width=1.2,
+        wheelbase=1.2,
+        wheel_radius=0.235,
+        margin=1.0,
+    )
+
+    assert x == pytest.approx(-7.5)
+    assert y == pytest.approx(8.165)
+    assert theta == pytest.approx(0.0)
+
+
+def test_quat_from_yaw_uses_isaac_wxyz_order():
+    assert quat_from_yaw(0.0) == pytest.approx((1.0, 0.0, 0.0, 0.0))
+    assert quat_from_yaw(math.pi / 2.0) == pytest.approx(
+        (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
     )
 
 
-def _rate_limit(*, current: float, target: float, max_delta: float) -> float:
-    delta = target - current
-    return float(current + np.clip(delta, -max_delta, max_delta))
+def test_planar_yaw_matches_z_yaw_when_roll_pitch_zero():
+    from pure_pursuit_controller import planar_yaw_from_pose
+
+    theta = math.radians(27.0)
+    quat = quat_from_yaw(theta)
+    assert planar_yaw_from_pose(quat) == pytest.approx(yaw_from_quat(quat))
 
 
-def _append_unique(path: list[tuple[float, float]], point: tuple[float, float]) -> None:
-    if path and math.isclose(path[-1][0], point[0], abs_tol=1e-9) and math.isclose(
-        path[-1][1], point[1], abs_tol=1e-9
-    ):
-        return
-    path.append((float(point[0]), float(point[1])))
+def test_tracking_pose_applies_body_offset():
+    from pure_pursuit_controller import tracking_pose_for_planar_path
+
+    tx, ty, tz, yaw = tracking_pose_for_planar_path(
+        (10.0, -5.0, 1.25),
+        quat_from_yaw(0.0),
+        offset_body=(1.0, 0.5, -0.25),
+    )
+    assert tx == pytest.approx(11.0)
+    assert ty == pytest.approx(-4.5)
+    assert tz == pytest.approx(1.0)
+    assert yaw == pytest.approx(0.0)
 
 
-__all__ = [
-    "DEFAULT_FIELD_LENGTH",
-    "DEFAULT_GROUND_SIZE",
-    "DEFAULT_MAIN_LANE_COUNT",
-    "DEFAULT_STEER_SIGN",
-    "DEFAULT_SEMICIRCLE_COUNT",
-    "DEFAULT_FIELD_WIDTH",
-    "DEFAULT_TRACK_WIDTH",
-    "DEFAULT_WHEEL_RADIUS",
-    "DEFAULT_WHEELBASE",
-    "PurePursuitCommand",
-    "PurePursuitTracker",
-    "apply_command",
-    "clamp_field_length_to_ground",
-    "compute_platform_corner_start_pose",
-    "generate_main_lane_path",
-    "generate_lawnmower_path",
-    "limit_actuator_command",
-    "quat_from_yaw",
-    "speed_from_curvature",
-    "transform_path_to_pose",
-    "yaw_from_quat",
-]
+def test_planar_speed_drops_vertical_motion():
+    from pure_pursuit_controller import planar_speed_from_linear_velocity
+
+    assert planar_speed_from_linear_velocity((3.0, 4.0, 12.0)) == pytest.approx(5.0)
+
+
+def test_recommended_max_lateral_accel_matches_dynamic_ground_mu():
+    a = recommended_max_lateral_accel_mps2(friction_coupling=1.0, use_dynamic_mu=True)
+    assert a == pytest.approx(0.45 * GRAVITY_MPS2)
+
+
+def test_recommended_max_lateral_accel_rejects_invalid_coupling():
+    with pytest.raises(ValueError, match="friction_coupling"):
+        recommended_max_lateral_accel_mps2(friction_coupling=0.0)
+
+
+def test_recommended_profile_versions_match_and_tracker_builds():
+    from pure_pursuit_controller import (
+        DEFAULT_TRACK_WIDTH,
+        DEFAULT_WHEEL_RADIUS,
+        DEFAULT_WHEELBASE,
+        RECOMMENDED_PURE_PURSUIT,
+        RECOMMENDED_SCRIPT,
+        PurePursuitTracker,
+    )
+
+    assert RECOMMENDED_PURE_PURSUIT.version == RECOMMENDED_SCRIPT.version
+    kw = RECOMMENDED_PURE_PURSUIT.tracker_kwargs(
+        max_steer=RECOMMENDED_SCRIPT.max_steer_rad,
+        steer_sign=-1.0,
+    )
+    tracker = PurePursuitTracker(
+        [(0.0, 0.0), (5.0, 0.0)],
+        wheelbase=DEFAULT_WHEELBASE,
+        track_width=DEFAULT_TRACK_WIDTH,
+        wheel_radius=DEFAULT_WHEEL_RADIUS,
+        **kw,
+    )
+    cmd = tracker.compute(0.0, 0.0, 0.0, 0.5)
+    assert cmd.done is False
+
+
+def test_lateral_accel_cap_limits_curvature_at_speed():
+    tracker = PurePursuitTracker(
+        [(0.0, 0.0), (20.0, 0.0)],
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        min_lookahead=1.0,
+        max_lookahead=1.0,
+        lookahead_gain=1.0,
+        alpha=0.0,
+        heading_gain=0.0,
+        max_steer=math.radians(50.0),
+        max_lateral_accel_mps2=0.5,
+    )
+    cmd = tracker.compute(x=0.0, y=1.5, theta=0.0, v_mps=2.0)
+    k_lat = 0.5 / 4.0
+    k_steer = math.tan(math.radians(50.0)) / 1.2
+    assert abs(cmd.curvature) <= min(k_lat, k_steer) + 1e-5
+
+
+def test_transform_path_to_pose_anchors_field_path_at_robot_start():
+    path = generate_lawnmower_path(field_length=30.0, field_width=3.0, semicircle_count=9)
+
+    anchored = transform_path_to_pose(path, x=10.0, y=20.0, theta=0.0)
+    rotated = transform_path_to_pose(path, x=10.0, y=20.0, theta=math.pi / 2.0)
+
+    assert anchored[0] == pytest.approx((10.0, 20.0))
+    assert anchored[1] == pytest.approx((40.0, 20.0))
+    assert anchored[-1] == pytest.approx((40.0, 17.0))
+    assert rotated[0] == pytest.approx((10.0, 20.0))
+    assert rotated[1] == pytest.approx((10.0, 50.0))
+    assert rotated[-1] == pytest.approx((13.0, 50.0))
+
+
+def test_tracker_progress_does_not_jump_backward_on_dense_parallel_lanes():
+    tracker = PurePursuitTracker(generate_lawnmower_path(), min_lookahead=0.25, max_lookahead=0.8)
+
+    first = tracker.compute(x=20.0, y=3.0, theta=0.0, v_mps=0.5)
+    second = tracker.compute(x=20.0, y=2.6666666667, theta=math.pi, v_mps=0.5)
+
+    assert second.closest_progress >= first.closest_progress
+
+
+def test_heading_gain_reduces_spurious_curvature_on_straight_when_yaw_misaligned():
+    tracker = PurePursuitTracker(
+        [(0.0, 0.0), (10.0, 0.0)],
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        lookahead_gain=1.0,
+        min_lookahead=1.0,
+        max_lookahead=1.0,
+        alpha=0.0,
+        heading_gain=1.0,
+    )
+    no_heading = PurePursuitTracker(
+        [(0.0, 0.0), (10.0, 0.0)],
+        wheelbase=1.2,
+        track_width=1.2,
+        wheel_radius=0.25,
+        lookahead_gain=1.0,
+        min_lookahead=1.0,
+        max_lookahead=1.0,
+        alpha=0.0,
+        heading_gain=0.0,
+    )
+
+    yaw_error = math.radians(12.0)
+    cmd_none = no_heading.compute(x=1.0, y=0.0, theta=yaw_error, v_mps=0.15)
+    cmd_fix = tracker.compute(x=1.0, y=0.0, theta=yaw_error, v_mps=0.15)
+
+    assert abs(cmd_fix.curvature) + 1e-3 < abs(cmd_none.curvature)
+
+
+def test_tracker_progress_uses_local_window_to_avoid_far_lane_jumps():
+    tracker = PurePursuitTracker(
+        [(0.0, 0.0), (10.0, 0.0), (10.0, 1.0), (0.0, 1.0)],
+        min_lookahead=0.5,
+        max_lookahead=0.5,
+        progress_search_ahead=2.0,
+    )
+
+    tracker.compute(x=4.0, y=0.0, theta=0.0, v_mps=0.5)
+    cmd = tracker.compute(x=8.0, y=1.0, theta=0.0, v_mps=0.5)
+
+    assert cmd.closest_progress <= 6.0
+
+
+def test_offline_straight_path_validation_finishes_with_low_error():
+    result = simulate_path(
+        [(0.0, 0.0), (4.0, 0.0)],
+        initial_pose=(0.0, 0.0, 0.0),
+        v_mps=0.8,
+        dt=0.05,
+        max_steps=300,
+    )
+
+    assert result.done is True
+    assert result.rmse_cte < 0.05
+    assert result.max_cte < 0.05
+    assert result.steer_sign_changes == 0
+
+
+def test_offline_arc_and_four_point_validation_have_bounded_error():
+    arc = [(3.0 * math.cos(a), 3.0 * math.sin(a)) for a in np.linspace(0.0, math.pi / 2.0, 16)]
+    arc_result = simulate_path(
+        arc,
+        initial_pose=(3.0, 0.0, math.pi / 2.0),
+        v_mps=0.8,
+        dt=0.05,
+        max_steps=300,
+    )
+    four_point_result = simulate_path(
+        [(2.0, 0.0), (4.0, 2.0), (2.0, 4.0), (0.0, 2.0)],
+        initial_pose=(2.0, 0.0, 0.0),
+        v_mps=0.8,
+        dt=0.05,
+        max_steps=400,
+    )
+
+    assert arc_result.done is True
+    assert arc_result.rmse_cte < 0.05
+    assert arc_result.max_cte < 0.1
+    assert four_point_result.done is True
+    assert four_point_result.rmse_cte < 0.2
+    assert four_point_result.max_cte < 0.3
+
+
+def test_offline_30_by_3_field_validation_reaches_end():
+    result = simulate_path(
+        generate_lawnmower_path(),
+        initial_pose=(0.0, 3.0, 0.0),
+        v_mps=0.5,
+        dt=0.2,
+        max_steps=4000,
+        alpha=0.7,
+        min_lookahead=0.25,
+        max_lookahead=0.8,
+        goal_tolerance=0.3,
+    )
+
+    assert result.done is True
+    assert result.rmse_cte < 0.08
+    assert result.max_cte < 0.45
+
+
+def test_script_editor_version_uses_existing_isaac_session():
+    script = Path(__file__).resolve().parents[1] / "pure_pursuit_script_editor.py"
+    text = script.read_text(encoding="utf-8")
+
+    assert "SimulationApp" not in text
+    assert "open_stage" not in text
+    assert 'PROJECT_DIR = "/workspace/sim"' in text
+    assert "sys.path.insert(0, PROJECT_DIR)" in text
+    assert "transform_path_to_pose" in text
+    assert "generate_main_lane_path" in text
+    assert "MAIN_LANE_COUNT = DEFAULT_MAIN_LANE_COUNT" in text
+    assert "clamp_field_length_to_ground" in text
+    assert "compute_platform_corner_start_pose" in text
+    assert "limit_actuator_command" in text
+    assert "PP = RECOMMENDED_PURE_PURSUIT" in text
+    assert "SC = RECOMMENDED_SCRIPT" in text
+    assert "CRUISE_SPEED_MPS = SC.cruise_speed_mps" in text
+    assert "TURN_SPEED_MPS = SC.turn_speed_mps" in text
+    assert "SLOWDOWN_CURVATURE = SC.slowdown_curvature" in text
+    assert "STRAIGHT_CURVATURE_DEADBAND = SC.straight_curvature_deadband" in text
+    assert "ACCEL_LIMIT_MPS2 = SC.accel_limit_mps2" in text
+    assert "DECEL_LIMIT_MPS2 = SC.decel_limit_mps2" in text
+    assert "MAX_WHEEL_ACCEL_RAD_S2 = SC.max_wheel_accel_rad_s2" in text
+    assert "MAX_STEER_RAD = SC.max_steer_rad" in text
+    assert "MAX_STEER_RATE_RAD_S = SC.max_steer_rate_rad_s" in text
+    assert "DYNAMIC_MARGIN_M = SC.dynamic_margin_m" in text
+    assert "VEHICLE_HALF_LENGTH_M" in text
+    assert "vehicle_half_length=VEHICLE_HALF_LENGTH_M" in text
+    assert "LOOKAHEAD_MIN_M = PP.min_lookahead" in text
+    assert "LOOKAHEAD_MAX_M = PP.max_lookahead" in text
+    assert "**PP.tracker_kwargs" in text
+    assert "HEADING_GAIN_PATH = PP.heading_gain" in text
+    assert "_reset_robot_state(bot)" in text
+    assert "bot.robot.set_joint_positions" in text
+    assert "bot.robot.set_joint_velocities" in text
+    assert "STALL_SPEED_MPS = SC.stall_speed_mps" in text
+    assert "STALL_CURVATURE = SC.stall_curvature" in text
+    assert "STALL_CRAWL_SPEED_MPS = SC.stall_crawl_speed_mps" in text
+    assert "STALL_MAX_STEER_RAD = SC.stall_max_steer_rad" in text
+    assert "FIELD_WIDTH = 5.0" in text
+    assert "dynamic_margin=DYNAMIC_MARGIN_M" in text
+    assert "FIRST_STRAIGHT_LEN_M" in text
+    assert "straight_left=" in text
+    assert "SLIP_SPEED_FRACTION = SC.slip_speed_fraction" in text
+    assert "ISAAC_REAR_STEER_SIGN = -1.0" in text
+    assert "steer_sign=ISAAC_REAR_STEER_SIGN" in text
+    assert "DEBUG_PERIOD_S = SC.debug_period_s" in text
+    assert "debug_state" in text
+    assert "pose_state" in text
+    assert "v_measured" in text
+    assert "stalling" in text
+    assert "_distance_to_path" in text
+    assert "_joint_position_or_nan" in text
+    assert "cte=" in text
+    assert "actual_steer=" in text
+    assert "raw_command = replace(" in text
+    assert "set_world_pose" in text
+    assert "quat_from_yaw" in text
+    assert "speed_from_curvature" in text
+    assert "current_pos, _current_quat = bot.robot.get_world_pose()" in text
+    assert "add_physics_callback" not in text
+    assert "remove_physics_callback" not in text
+    assert "omni.physx" in text
+    assert "subscribe_physics_step_events" in text
+    assert "preset=(" in text
+    assert "tracking_pose_for_planar_path" in text
+    assert "planar_speed_from_linear_velocity" in text
+    assert "TRACKING_OFFSET_BODY_M" in text
+    assert "USE_LINEAR_VELOCITY_FOR_SPEED" in text
+    assert "get_linear_velocity()" in text
+    assert "RECOMMENDED_PURE_PURSUIT" in text
+    assert "RECOMMENDED_SCRIPT" in text

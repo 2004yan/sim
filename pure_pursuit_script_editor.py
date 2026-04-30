@@ -34,14 +34,18 @@ from pure_pursuit_controller import (
     DEFAULT_WHEEL_RADIUS,
     DEFAULT_WHEELBASE,
     PurePursuitTracker,
+    RECOMMENDED_PURE_PURSUIT,
+    RECOMMENDED_SCRIPT,
     apply_command,
     clamp_field_length_to_ground,
     compute_platform_corner_start_pose,
     generate_main_lane_path,
     generate_lawnmower_path,
     limit_actuator_command,
+    planar_speed_from_linear_velocity,
     quat_from_yaw,
     speed_from_curvature,
+    tracking_pose_for_planar_path,
     transform_path_to_pose,
     yaw_from_quat,
 )
@@ -49,26 +53,31 @@ from pure_pursuit_controller import (
 
 SUBSCRIPTION_ATTR = "_pure_pursuit_physics_subscription"
 
-CRUISE_SPEED_MPS = 0.9
-TURN_SPEED_MPS = 0.15
-SLOWDOWN_CURVATURE = 0.12
-STRAIGHT_CURVATURE_DEADBAND = 0.03
-ACCEL_LIMIT_MPS2 = 0.6
-DECEL_LIMIT_MPS2 = 0.6
-MAX_WHEEL_RAD_S = 12.0
-MAX_WHEEL_ACCEL_RAD_S2 = 8.0
-MAX_STEER_RAD = math.radians(50.0)
-MAX_STEER_RATE_RAD_S = math.radians(60.0)
+# --- 推荐预设（单一点维护；与 ``RECOMMENDED_PURE_PURSUIT`` / ``RECOMMENDED_SCRIPT`` 同步）---
+PP = RECOMMENDED_PURE_PURSUIT
+SC = RECOMMENDED_SCRIPT
+
+CRUISE_SPEED_MPS = SC.cruise_speed_mps
+TURN_SPEED_MPS = SC.turn_speed_mps
+SLOWDOWN_CURVATURE = SC.slowdown_curvature
+STRAIGHT_CURVATURE_DEADBAND = SC.straight_curvature_deadband
+ACCEL_LIMIT_MPS2 = SC.accel_limit_mps2
+DECEL_LIMIT_MPS2 = SC.decel_limit_mps2
+MAX_WHEEL_RAD_S = SC.max_wheel_rad_s
+MAX_WHEEL_ACCEL_RAD_S2 = SC.max_wheel_accel_rad_s2
+MAX_STEER_RAD = SC.max_steer_rad
+MAX_STEER_RATE_RAD_S = SC.max_steer_rate_rad_s
 ISAAC_REAR_STEER_SIGN = -1.0
-DYNAMIC_MARGIN_M = 0.5
-LOOKAHEAD_MIN_M = 0.6
-LOOKAHEAD_MAX_M = 1.2
-HEADING_GAIN_PATH = 0.9
-DEBUG_PERIOD_S = 0.5
-STALL_SPEED_MPS = 0.03
-STALL_CURVATURE = 0.5
-STALL_CRAWL_SPEED_MPS = 0.25
-STALL_MAX_STEER_RAD = math.radians(15.0)
+DYNAMIC_MARGIN_M = SC.dynamic_margin_m
+LOOKAHEAD_MIN_M = PP.min_lookahead
+LOOKAHEAD_MAX_M = PP.max_lookahead
+HEADING_GAIN_PATH = PP.heading_gain
+DEBUG_PERIOD_S = SC.debug_period_s
+STALL_SPEED_MPS = SC.stall_speed_mps
+STALL_CURVATURE = SC.stall_curvature
+STALL_CRAWL_SPEED_MPS = SC.stall_crawl_speed_mps
+STALL_MAX_STEER_RAD = SC.stall_max_steer_rad
+SLIP_SPEED_FRACTION = SC.slip_speed_fraction
 VEHICLE_HALF_LENGTH_M = (DEFAULT_WHEELBASE + 2.0 * DEFAULT_WHEEL_RADIUS) / 2.0
 REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = 5.0
@@ -76,6 +85,15 @@ GROUND_SIZE = DEFAULT_GROUND_SIZE
 SEMICIRCLE_COUNT = DEFAULT_SEMICIRCLE_COUNT
 MAIN_LANE_COUNT = DEFAULT_MAIN_LANE_COUNT
 PLATFORM_MARGIN = 1.0
+
+# 3D pose -> planar tracking frame (Isaac ``get_world_pose`` is SE(3)):
+# - offset is in the robot *body* frame (e.g. rear axle vs articulation root)
+# - forward axis should match the USD/URDF +X (change if your asset differs)
+TRACKING_OFFSET_BODY_M = (0.0, 0.0, 0.0)
+BODY_FORWARD_AXIS = (1.0, 0.0, 0.0)
+WORLD_UP_AXIS = (0.0, 0.0, 1.0)
+# Prefer PhysX linear velocity (world frame) for speed estimate; falls back to finite-diff XY.
+USE_LINEAR_VELOCITY_FOR_SPEED = True
 
 
 def _clear_existing_subscription() -> None:
@@ -175,15 +193,7 @@ tracker = PurePursuitTracker(
     wheelbase=DEFAULT_WHEELBASE,
     track_width=DEFAULT_TRACK_WIDTH,
     wheel_radius=DEFAULT_WHEEL_RADIUS,
-    lookahead_gain=1.0,
-    min_lookahead=LOOKAHEAD_MIN_M,
-    max_lookahead=LOOKAHEAD_MAX_M,
-    alpha=0.6,
-    max_steer=MAX_STEER_RAD,
-    goal_tolerance=0.3,
-    steer_sign=ISAAC_REAR_STEER_SIGN,
-    progress_search_ahead=3.0,
-    heading_gain=HEADING_GAIN_PATH,
+    **PP.tracker_kwargs(max_steer=MAX_STEER_RAD, steer_sign=ISAAC_REAR_STEER_SIGN),
 )
 speed_state = {"v_mps": TURN_SPEED_MPS}
 command_state = {
@@ -206,17 +216,30 @@ def _advance_speed(current_speed: float, target_speed: float, step_size: float) 
 def pure_pursuit_step(_step_size: float) -> None:
     step_size = max(float(_step_size), 1.0 / 60.0)
     pos, quat = bot.robot.get_world_pose()
-    theta = yaw_from_quat(quat)
-    xy = np.array([float(pos[0]), float(pos[1])], dtype=float)
-    instant_v = float(np.linalg.norm(xy - pose_state["last_xy"]) / step_size)
-    pose_state["last_xy"] = xy
-    pose_state["v_measured"] = 0.8 * pose_state["v_measured"] + 0.2 * instant_v
+    tx, ty, _tz, yaw_planar = tracking_pose_for_planar_path(
+        pos,
+        quat,
+        offset_body=TRACKING_OFFSET_BODY_M,
+        body_forward=BODY_FORWARD_AXIS,
+        world_up=WORLD_UP_AXIS,
+    )
+    track_xy = np.array([tx, ty], dtype=float)
+    instant_v = float(np.linalg.norm(track_xy - pose_state["last_xy"]) / step_size)
+    pose_state["last_xy"] = track_xy
+    v_blend = instant_v
+    if USE_LINEAR_VELOCITY_FOR_SPEED:
+        try:
+            lin_vel = bot.robot.get_linear_velocity()
+            v_blend = planar_speed_from_linear_velocity(lin_vel, world_up=WORLD_UP_AXIS)
+        except Exception:
+            v_blend = instant_v
+    pose_state["v_measured"] = 0.8 * pose_state["v_measured"] + 0.2 * v_blend
     desired_v = speed_state["v_mps"]
     v_mps = min(desired_v, max(pose_state["v_measured"] + 0.25, TURN_SPEED_MPS))
     raw_command = tracker.compute(
-        x=float(pos[0]),
-        y=float(pos[1]),
-        theta=theta,
+        x=tx,
+        y=ty,
+        theta=yaw_planar,
         v_mps=v_mps,
     )
     stalling = (
@@ -258,11 +281,17 @@ def pure_pursuit_step(_step_size: float) -> None:
         slowdown_curvature=SLOWDOWN_CURVATURE,
         straight_curvature_deadband=STRAIGHT_CURVATURE_DEADBAND,
     )
+    try:
+        v_cmd_rim = ((raw_command.left_rad_s + raw_command.right_rad_s) * 0.5) * DEFAULT_WHEEL_RADIUS
+        if v_cmd_rim > 0.06 and pose_state["v_measured"] < SLIP_SPEED_FRACTION * v_cmd_rim:
+            target_speed = min(target_speed, max(pose_state["v_measured"], 0.5 * TURN_SPEED_MPS))
+    except Exception:
+        pass
     speed_state["v_mps"] = _advance_speed(speed_state["v_mps"], target_speed, step_size)
     debug_state["elapsed_s"] += step_size
     if debug_state["elapsed_s"] >= DEBUG_PERIOD_S:
         debug_state["elapsed_s"] = 0.0
-        cte = _distance_to_path(tracker, xy)
+        cte = _distance_to_path(tracker, track_xy)
         actual_steer = _joint_position_or_nan(bot, bot.rear_link_idx)
         straight_left_m = max(0.0, FIRST_STRAIGHT_LEN_M - float(raw_command.closest_progress))
         print(
@@ -294,6 +323,7 @@ subscription = physx_interface.subscribe_physics_step_events(pure_pursuit_step)
 setattr(builtins, SUBSCRIPTION_ATTR, subscription)
 print(
     "[pure_pursuit] PhysX subscription installed: "
+    f"preset=({PP.version},{SC.version}) "
     f"{len(WAYPOINTS)} path points, start=({float(start_pos[0]):.2f}, "
     f"{float(start_pos[1]):.2f}), heading={start_theta:.2f}rad, "
     f"field={FIELD_LENGTH}m x {FIELD_WIDTH}m, main_lanes={MAIN_LANE_COUNT}, "
