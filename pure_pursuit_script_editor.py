@@ -60,6 +60,9 @@ MAX_WHEEL_ACCEL_RAD_S2 = 8.0
 MAX_STEER_RAD = math.radians(50.0)
 MAX_STEER_RATE_RAD_S = math.radians(60.0)
 ISAAC_REAR_STEER_SIGN = -1.0
+DYNAMIC_MARGIN_M = 0.5
+LOOKAHEAD_MIN_M = 0.6
+LOOKAHEAD_MAX_M = 1.0
 DEBUG_PERIOD_S = 0.5
 STALL_SPEED_MPS = 0.03
 STALL_CURVATURE = 0.5
@@ -79,6 +82,48 @@ def _clear_existing_subscription() -> None:
         subscription.unsubscribe()
     setattr(builtins, SUBSCRIPTION_ATTR, None)
 
+
+def _reset_robot_state(bot: PaddyRobotController) -> None:
+    """Reset physical joint state so reruns do not inherit the last steering angle."""
+    bot.stop()
+    bot.set_steering_angle(0.0)
+    if bot.rear_link_idx is not None:
+        bot.robot.set_joint_positions(
+            positions=np.array([0.0], dtype=np.float32),
+            joint_indices=np.array([bot.rear_link_idx], dtype=np.int32),
+        )
+    wheel_indices = [
+        index
+        for index in (bot.left_idx, bot.right_idx, bot.rear_wheel_idx)
+        if index is not None
+    ]
+    if wheel_indices:
+        bot.robot.set_joint_velocities(
+            velocities=np.zeros(len(wheel_indices), dtype=np.float32),
+            joint_indices=np.array(wheel_indices, dtype=np.int32),
+        )
+
+
+def _distance_to_path(tracker: PurePursuitTracker, xy: np.ndarray) -> float:
+    progress = tracker._closest_progress(xy)
+    closest = tracker._point_at_progress(progress)
+    return float(np.linalg.norm(xy - closest))
+
+
+def _joint_position_or_nan(bot: PaddyRobotController, joint_index: int | None) -> float:
+    if joint_index is None:
+        return math.nan
+    try:
+        values = bot.robot.get_joint_positions(
+            joint_indices=np.array([joint_index], dtype=np.int32),
+        )
+    except Exception:
+        return math.nan
+    if values is None or len(values) == 0:
+        return math.nan
+    return float(values[0])
+
+
 bot = PaddyRobotController()
 current_pos, _current_quat = bot.robot.get_world_pose()
 start_x, start_y, start_theta = compute_platform_corner_start_pose(
@@ -89,12 +134,12 @@ start_x, start_y, start_theta = compute_platform_corner_start_pose(
     wheelbase=DEFAULT_WHEELBASE,
     wheel_radius=DEFAULT_WHEEL_RADIUS,
     margin=PLATFORM_MARGIN,
+    dynamic_margin=DYNAMIC_MARGIN_M,
 )
 start_pos = np.array([start_x, start_y, float(current_pos[2])], dtype=np.float32)
 start_quat = np.array(quat_from_yaw(start_theta), dtype=np.float32)
-bot.stop()
-bot.set_steering_angle(0.0)
 bot.robot.set_world_pose(position=start_pos, orientation=start_quat)
+_reset_robot_state(bot)
 lane_spacing = FIELD_WIDTH / float(MAIN_LANE_COUNT - 1)
 turn_radius = lane_spacing / 2.0
 FIELD_LENGTH = clamp_field_length_to_ground(
@@ -105,6 +150,7 @@ FIELD_LENGTH = clamp_field_length_to_ground(
     turn_radius=turn_radius,
     ground_size=GROUND_SIZE,
     margin=PLATFORM_MARGIN,
+    dynamic_margin=DYNAMIC_MARGIN_M,
 )
 
 # Use the feasible demo path by default. Set MAIN_LANE_COUNT to 2 for a wider
@@ -126,12 +172,13 @@ tracker = PurePursuitTracker(
     track_width=DEFAULT_TRACK_WIDTH,
     wheel_radius=DEFAULT_WHEEL_RADIUS,
     lookahead_gain=1.0,
-    min_lookahead=1.2,
-    max_lookahead=2.5,
-    alpha=0.0,
+    min_lookahead=LOOKAHEAD_MIN_M,
+    max_lookahead=LOOKAHEAD_MAX_M,
+    alpha=0.6,
     max_steer=MAX_STEER_RAD,
     goal_tolerance=0.3,
     steer_sign=ISAAC_REAR_STEER_SIGN,
+    progress_search_ahead=3.0,
 )
 speed_state = {"v_mps": TURN_SPEED_MPS}
 command_state = {
@@ -210,15 +257,19 @@ def pure_pursuit_step(_step_size: float) -> None:
     debug_state["elapsed_s"] += step_size
     if debug_state["elapsed_s"] >= DEBUG_PERIOD_S:
         debug_state["elapsed_s"] = 0.0
+        cte = _distance_to_path(tracker, xy)
+        actual_steer = _joint_position_or_nan(bot, bot.rear_link_idx)
         print(
             "[pure_pursuit] "
             f"progress={raw_command.closest_progress:.2f}/{tracker.total_length:.2f}m "
             f"k={raw_command.curvature:.3f} "
             f"target_v={target_speed:.2f} cmd_v={speed_state['v_mps']:.2f} "
             f"meas_v={pose_state['v_measured']:.2f} "
+            f"cte={cte:.2f} "
             f"stall={stalling} "
             f"L={command.left_rad_s:.2f} R={command.right_rad_s:.2f} "
             f"steer={math.degrees(command.steer_rad):.1f}deg "
+            f"actual_steer={math.degrees(actual_steer):.1f}deg "
             f"lookahead=({raw_command.lookahead_point[0]:.2f}, "
             f"{raw_command.lookahead_point[1]:.2f})"
         )
