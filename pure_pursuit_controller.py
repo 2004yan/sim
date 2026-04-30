@@ -756,10 +756,13 @@ def generate_lawnmower_path(
     semicircle_count: int = DEFAULT_SEMICIRCLE_COUNT,
     turn_samples: int = 13,
 ) -> list[tuple[float, float]]:
-    """Generate a 30m x 3m-style coverage path with alternating semicircle turns.
+    """Boustrophedon path: long straights + 180° semicircle headlands.
 
-    Coordinates follow the planning sketch: start at the upper-left corner,
-    drive along the field length, then use headland semicircles to step down.
+    ``field_length`` is the straight run (e.g. 30 m in the field diagram).
+    ``field_width`` is the total span stepped in *y* (``row_spacing * num_rows``);
+    each step uses semicircle radius ``(field_width / semicircle_count) / 2`` (e.g.
+    3 m row spacing ⇒ 1.5 m radius for a half-circle turn between passes).
+    Start polyline vertex is the upper-left of the local patch, first segment toward +x.
     """
     if field_length <= 0:
         raise ValueError("field_length must be positive")
@@ -802,7 +805,11 @@ def generate_main_lane_path(
     lane_count: int = DEFAULT_MAIN_LANE_COUNT,
     turn_samples: int = 40,
 ) -> list[tuple[float, float]]:
-    """Generate a feasible demo path with 2 or 3 main vehicle-center lanes."""
+    """Generate a feasible demo path with 2 or 3 main vehicle-center lanes.
+
+    U-turns are a **single** semicircle per transition (continuous :math:`\\pi` rad in
+    heading along the polyline), not two quarter-turn polylines.
+    """
     if field_length <= 0:
         raise ValueError("field_length must be positive")
     if field_width <= 0:
@@ -873,8 +880,17 @@ def clamp_field_length_to_ground(
     dynamic_margin: float = 0.0,
     vehicle_half_length: float = 0.0,
 ) -> float:
-    """Clamp forward path length so the far turn stays inside a square ground plane."""
-    if requested_length <= 0:
+    """Clamp forward path length so the far turn stays inside a square ground plane.
+
+    ``requested_length`` may be ``math.inf`` to use the maximum usable straight that
+    still fits (given ``ground_size``, margins, and ``turn_radius``).
+    """
+    if math.isnan(requested_length):
+        raise ValueError("requested_length must not be NaN")
+    if math.isinf(requested_length):
+        if requested_length < 0:
+            raise ValueError("requested_length must not be -inf")
+    elif requested_length <= 0:
         raise ValueError("requested_length must be positive")
     if turn_radius < 0:
         raise ValueError("turn_radius must be non-negative")
@@ -903,7 +919,11 @@ def clamp_field_length_to_ground(
         distances.append((-half - y) / dy)
 
     forward_to_edge = min((distance for distance in distances if distance > 0.0), default=requested_length)
-    forward_extent = turn_radius + vehicle_half_length
+    # ``turn_radius`` reserves space for the 180° arc apex beyond the lane corner (centerline).
+    # Start pose already insets ``vehicle_half_length`` (or turn radius) from the platform edge,
+    # so counting the **full** half-length again here over-shortens the first straight. Keep a
+    # small coupling term for nose clearance in tight fits.
+    forward_extent = float(turn_radius) + 0.35 * float(vehicle_half_length)
     usable_length = forward_to_edge - margin - dynamic_margin - forward_extent
     return float(np.clip(usable_length, min_length, requested_length))
 
@@ -943,6 +963,63 @@ def compute_platform_corner_start_pose(
     x = -half + margin + dynamic_margin + max(vehicle_half_length, turn_radius)
     y = half - margin - dynamic_margin - vehicle_half_width
     return (float(x), float(y), float(theta))
+
+
+def compute_platform_coverage_start_pose(
+    *,
+    ground_size: float = DEFAULT_GROUND_SIZE,
+    turn_radius: float,
+    track_width: float = DEFAULT_TRACK_WIDTH,
+    wheelbase: float = DEFAULT_WHEELBASE,
+    wheel_radius: float = DEFAULT_WHEEL_RADIUS,
+    margin: float = 1.0,
+    dynamic_margin: float = 0.0,
+    start_edge: str = "upper_left_plus_x",
+) -> tuple[float, float, float]:
+    """Corner pose for lawnmower / boustrophedon paths (explicit ``turn_radius``).
+
+    - ``upper_left_plus_x``: first straight runs toward +X (diagram start).
+    - ``upper_right_minus_x``: first straight runs toward −X (common Isaac view).
+    """
+    if ground_size <= 0:
+        raise ValueError("ground_size must be positive")
+    if turn_radius < 0:
+        raise ValueError("turn_radius must be non-negative")
+    if track_width <= 0 or wheelbase <= 0 or wheel_radius <= 0:
+        raise ValueError("vehicle dimensions must be positive")
+    if margin < 0:
+        raise ValueError("margin must be non-negative")
+    if dynamic_margin < 0:
+        raise ValueError("dynamic_margin must be non-negative")
+    if start_edge not in ("upper_left_plus_x", "upper_right_minus_x"):
+        raise ValueError("start_edge must be 'upper_left_plus_x' or 'upper_right_minus_x'")
+
+    half = ground_size / 2.0
+    vehicle_half_width = (track_width + 2.0 * wheel_radius) / 2.0
+    vehicle_half_length = (wheelbase + 2.0 * wheel_radius) / 2.0
+    inset = margin + dynamic_margin + max(vehicle_half_length, turn_radius)
+    y = half - margin - dynamic_margin - vehicle_half_width
+    if start_edge == "upper_left_plus_x":
+        x = -half + inset
+        theta = 0.0
+    else:
+        x = half - inset
+        theta = math.pi
+    return (float(x), float(y), float(theta))
+
+
+def mirror_path_along_field_length(
+    path: Iterable[Sequence[float]],
+    *,
+    field_length: float,
+) -> list[tuple[float, float]]:
+    """Reflect path in x about ``x = field_length / 2`` so the first run goes west."""
+    if field_length <= 0:
+        raise ValueError("field_length must be positive")
+    points = [(float(px), float(py)) for px, py in path]
+    if not points:
+        return []
+    return [(float(field_length - px), py) for px, py in points]
 
 
 def speed_from_curvature(
@@ -1057,6 +1134,8 @@ __all__ = [
     "apply_command",
     "clamp_field_length_to_ground",
     "compute_platform_corner_start_pose",
+    "compute_platform_coverage_start_pose",
+    "mirror_path_along_field_length",
     "generate_main_lane_path",
     "generate_lawnmower_path",
     "limit_actuator_command",

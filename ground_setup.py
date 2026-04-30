@@ -30,6 +30,9 @@ stage = omni.usd.get_context().get_stage()
 # ─── 1. Create the ground plane ───────────────────────────────────────────────
 def create_ground_plane():
     PhysicsContext()
+    # ``size`` is an Isaac GroundPlane constructor argument (scene units). It is not
+    # automatically the same as "meters"; calibrate ``PLANNING_GROUND_EXTENT_M`` in
+    # ``pure_pursuit_script_editor.py`` to the traversable square you use for clamping.
     GroundPlane(
         prim_path=GROUND_PATH,
         size=40.0,

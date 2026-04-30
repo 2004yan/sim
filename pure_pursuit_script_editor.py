@@ -25,11 +25,7 @@ if PROJECT_DIR not in sys.path:
 
 from controller import PaddyRobotController
 from pure_pursuit_controller import (
-    DEFAULT_FIELD_LENGTH,
-    DEFAULT_FIELD_WIDTH,
     DEFAULT_GROUND_SIZE,
-    DEFAULT_MAIN_LANE_COUNT,
-    DEFAULT_SEMICIRCLE_COUNT,
     DEFAULT_TRACK_WIDTH,
     DEFAULT_WHEEL_RADIUS,
     DEFAULT_WHEELBASE,
@@ -38,9 +34,9 @@ from pure_pursuit_controller import (
     RECOMMENDED_SCRIPT,
     apply_command,
     clamp_field_length_to_ground,
-    compute_platform_corner_start_pose,
+    compute_platform_coverage_start_pose,
     generate_main_lane_path,
-    generate_lawnmower_path,
+    mirror_path_along_field_length,
     limit_actuator_command,
     planar_speed_from_linear_velocity,
     quat_from_yaw,
@@ -60,7 +56,9 @@ SC = RECOMMENDED_SCRIPT
 CRUISE_SPEED_MPS = SC.cruise_speed_mps
 TURN_SPEED_MPS = SC.turn_speed_mps
 SLOWDOWN_CURVATURE = SC.slowdown_curvature
-STRAIGHT_CURVATURE_DEADBAND = SC.straight_curvature_deadband
+# Slightly lower than ``SC`` so mild curvature at the start of the 180° arc is not
+# treated as “straight” and zeroed (which can look like a sharp 90°+90° jog).
+STRAIGHT_CURVATURE_DEADBAND = min(SC.straight_curvature_deadband, 0.012)
 ACCEL_LIMIT_MPS2 = SC.accel_limit_mps2
 DECEL_LIMIT_MPS2 = SC.decel_limit_mps2
 MAX_WHEEL_RAD_S = SC.max_wheel_rad_s
@@ -79,12 +77,17 @@ STALL_CRAWL_SPEED_MPS = SC.stall_crawl_speed_mps
 STALL_MAX_STEER_RAD = SC.stall_max_steer_rad
 SLIP_SPEED_FRACTION = SC.slip_speed_fraction
 VEHICLE_HALF_LENGTH_M = (DEFAULT_WHEELBASE + 2.0 * DEFAULT_WHEEL_RADIUS) / 2.0
-REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
+# Simple 回字 / U-turn demo: 三段长直道 + 两段 180° 半圆（``generate_main_lane_path``，``lane_count=3``）。
+MAIN_LANE_COUNT = 3
+# 三行在 *y* 方向的总跨度（规划用长度单位）；转弯半径 = (FIELD_WIDTH / (lane_count-1)) / 2。
 FIELD_WIDTH = 5.0
-# Must match GroundPlane size from ground_setup.py; else FIELD_LENGTH is clamped short.
-GROUND_SIZE = DEFAULT_GROUND_SIZE
-SEMICIRCLE_COUNT = DEFAULT_SEMICIRCLE_COUNT
-MAIN_LANE_COUNT = DEFAULT_MAIN_LANE_COUNT
+# Isaac ``GroundPlane(size=...)`` 的数值**不一定**等于米；以下只做**路径与限幅**用的方形边长（与你标定的一致即可）。
+# 若地台在 USD 里 40 但实际可跑 25 m，请把这里改成 25，不要把 ``ground_setup`` 的 40 死当成米。
+PLANNING_GROUND_EXTENT_M = float(DEFAULT_GROUND_SIZE)
+# 每一段「长直路」希望多长；``math.inf`` 表示在平地范围内尽量拉满（由 ``clamp_field_length_to_ground`` 决定）。
+REQUESTED_STRAIGHT_RUN_M = math.inf
+# ``upper_left_plus_x`` = 先朝 +X；``upper_right_minus_x`` = 先朝 −X（需镜像路径）。
+PLATFORM_START_EDGE = "upper_right_minus_x"
 PLATFORM_MARGIN = 1.0
 
 # 3D pose -> planar tracking frame (Isaac ``get_world_pose`` is SE(3)):
@@ -147,47 +150,47 @@ def _joint_position_or_nan(bot: PaddyRobotController, joint_index: int | None) -
 
 bot = PaddyRobotController()
 current_pos, _current_quat = bot.robot.get_world_pose()
-start_x, start_y, start_theta = compute_platform_corner_start_pose(
-    ground_size=GROUND_SIZE,
-    field_width=FIELD_WIDTH,
-    lane_count=MAIN_LANE_COUNT,
+lane_spacing = FIELD_WIDTH / float(MAIN_LANE_COUNT - 1)
+turn_radius = lane_spacing / 2.0
+start_x, start_y, start_theta = compute_platform_coverage_start_pose(
+    ground_size=PLANNING_GROUND_EXTENT_M,
+    turn_radius=turn_radius,
     track_width=DEFAULT_TRACK_WIDTH,
     wheelbase=DEFAULT_WHEELBASE,
     wheel_radius=DEFAULT_WHEEL_RADIUS,
     margin=PLATFORM_MARGIN,
     dynamic_margin=DYNAMIC_MARGIN_M,
+    start_edge=PLATFORM_START_EDGE,
 )
 start_pos = np.array([start_x, start_y, float(current_pos[2])], dtype=np.float32)
 start_quat = np.array(quat_from_yaw(start_theta), dtype=np.float32)
 bot.robot.set_world_pose(position=start_pos, orientation=start_quat)
 _reset_robot_state(bot)
-lane_spacing = FIELD_WIDTH / float(MAIN_LANE_COUNT - 1)
-turn_radius = lane_spacing / 2.0
 FIELD_LENGTH = clamp_field_length_to_ground(
     x=start_x,
     y=start_y,
     theta=start_theta,
-    requested_length=REQUESTED_FIELD_LENGTH,
+    requested_length=REQUESTED_STRAIGHT_RUN_M,
     turn_radius=turn_radius,
-    ground_size=GROUND_SIZE,
+    ground_size=PLANNING_GROUND_EXTENT_M,
     margin=PLATFORM_MARGIN,
     dynamic_margin=DYNAMIC_MARGIN_M,
     vehicle_half_length=VEHICLE_HALF_LENGTH_M,
 )
 
-# Use the feasible demo path by default. Set MAIN_LANE_COUNT to 2 for a wider
-# single U-turn, or 3 for a compact three-pass field demonstration.
 LOCAL_WAYPOINTS = generate_main_lane_path(
     field_length=FIELD_LENGTH,
     field_width=FIELD_WIDTH,
     lane_count=MAIN_LANE_COUNT,
     turn_samples=48,
 )
+if PLATFORM_START_EDGE == "upper_right_minus_x":
+    LOCAL_WAYPOINTS = mirror_path_along_field_length(LOCAL_WAYPOINTS, field_length=FIELD_LENGTH)
 WAYPOINTS = transform_path_to_pose(
     LOCAL_WAYPOINTS,
     x=start_x,
     y=start_y,
-    theta=start_theta,
+    theta=0.0,
 )
 FIRST_STRAIGHT_LEN_M = float(np.linalg.norm(np.asarray(WAYPOINTS[1]) - np.asarray(WAYPOINTS[0])))
 tracker = PurePursuitTracker(
@@ -329,6 +332,8 @@ print(
     f"preset=({PP.version},{SC.version}) "
     f"{len(WAYPOINTS)} path points, start=({float(start_pos[0]):.2f}, "
     f"{float(start_pos[1]):.2f}), heading={start_theta:.2f}rad, "
-    f"field={FIELD_LENGTH}m x {FIELD_WIDTH}m, main_lanes={MAIN_LANE_COUNT}, "
-    f"speed={TURN_SPEED_MPS}-{CRUISE_SPEED_MPS}m/s, ground={GROUND_SIZE}m"
+    f"path=simple_Ux2 (lanes={MAIN_LANE_COUNT}) straight_run={FIELD_LENGTH} "
+    f"field_W={FIELD_WIDTH} "
+    f"edge={PLATFORM_START_EDGE} planning_extent={PLANNING_GROUND_EXTENT_M} "
+    f"speed={TURN_SPEED_MPS}-{CRUISE_SPEED_MPS}m/s"
 )
