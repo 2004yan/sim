@@ -28,7 +28,10 @@ DEFAULT_FIELD_LENGTH = 30.0
 DEFAULT_FIELD_WIDTH = 3.0
 DEFAULT_SEMICIRCLE_COUNT = 9
 DEFAULT_MAIN_LANE_COUNT = 2
-DEFAULT_GROUND_SIZE = 20.0
+# Ground plane span for clamp_field_length / corner start pose. Must match
+# ``ground_setup.py`` GroundPlane ``size`` so requested straights are not
+# capped far below DEFAULT_FIELD_LENGTH on a small square.
+DEFAULT_GROUND_SIZE = 40.0
 
 # --- Physics / materials (keep in sync with ``ground_setup.py`` / ``robot_setup.py``) ---
 GRAVITY_MPS2 = 9.81
@@ -82,7 +85,7 @@ class RecommendedPurePursuitProfile:
     在「能跟住路径」与「少打滑、少抖舵」之间偏保守；调参只改这一处即可分叉版本。
     """
 
-    version: str = "2026.05-mud-v1"
+    version: str = "2026.05-mud-v2"
     friction_coupling: float = 0.48
     lookahead_gain: float = 1.0
     min_lookahead: float = 0.65
@@ -97,9 +100,9 @@ class RecommendedPurePursuitProfile:
     progress_retrack_margin_m: float = 0.12
     progress_relocalize_cte_m: float = 1.05
     heading_association_weight: float = 0.25
-    cte_gain: float = 0.38
     cte_softening_m: float = 0.42
-    path_lookahead_gain: float = 0.24
+    cte_gain: float = 0.34
+    path_lookahead_gain: float = 0.09
     alpha_min: float = 0.2
     alpha_curvature_half: float = 0.085
 
@@ -145,7 +148,7 @@ class RecommendedPurePursuitProfile:
 class RecommendedIsaacPurePursuitScript:
     """Script Editor 层推荐：限速、爬升 / 执行器限幅、打滑启发式。"""
 
-    version: str = "2026.05-mud-v1"
+    version: str = "2026.05-mud-v2"
     cruise_speed_mps: float = 0.85
     turn_speed_mps: float = 0.15
     slowdown_curvature: float = 0.11
@@ -222,6 +225,7 @@ class PurePursuitTracker:
         path_lookahead_gain: float = 0.0,
         alpha_min: float | None = None,
         alpha_curvature_half: float = 0.1,
+        phase_straight_end_progress: float | None = None,
     ) -> None:
         self.path = np.asarray(path, dtype=float)
         if self.path.ndim != 2 or self.path.shape[1] != 2 or len(self.path) < 2:
@@ -271,6 +275,8 @@ class PurePursuitTracker:
             raise ValueError("alpha_min must be in [0, 1] when provided")
         if alpha_curvature_half <= 0:
             raise ValueError("alpha_curvature_half must be positive")
+        if phase_straight_end_progress is not None and float(phase_straight_end_progress) < 0:
+            raise ValueError("phase_straight_end_progress must be non-negative when provided")
 
         self.wheelbase = float(wheelbase)
         self.track_width = float(track_width)
@@ -297,6 +303,9 @@ class PurePursuitTracker:
         self.path_lookahead_gain = float(path_lookahead_gain)
         self.alpha_min = None if alpha_min is None else float(alpha_min)
         self.alpha_curvature_half = float(alpha_curvature_half)
+        self.phase_straight_end_progress = (
+            None if phase_straight_end_progress is None else float(phase_straight_end_progress)
+        )
 
         self._segments = self.path[1:] - self.path[:-1]
         self._segment_lengths = np.linalg.norm(self._segments, axis=1)
@@ -304,6 +313,8 @@ class PurePursuitTracker:
             raise ValueError("path segments must have non-zero length")
         self._cum_lengths = np.concatenate(([0.0], np.cumsum(self._segment_lengths)))
         self.total_length = float(self._cum_lengths[-1])
+        if self.phase_straight_end_progress is not None and self.phase_straight_end_progress > self.total_length + 1e-9:
+            raise ValueError("phase_straight_end_progress exceeds path length")
         self._last_progress = 0.0
         self._has_progress = False
         self._last_segment_index = 0
@@ -390,6 +401,12 @@ class PurePursuitTracker:
             )
         )
         target_progress = min(closest_progress + lookahead, self.total_length)
+        spe = self.phase_straight_end_progress
+        in_first_straight = spe is not None and closest_progress < float(spe) - 1e-6
+        if spe is not None:
+            spe_f = float(spe)
+            if closest_progress <= spe_f + 1e-9:
+                target_progress = min(target_progress, spe_f)
         lookahead_point = self._point_at_progress(target_progress)
 
         dx, dy = lookahead_point - position
@@ -403,14 +420,16 @@ class PurePursuitTracker:
         path_heading = self._path_heading_at_progress(closest_progress)
         heading_error = self._wrap_angle(path_heading - theta)
         lookahead_distance = max(lookahead, self.min_lookahead)
-        curvature_heading = -self.heading_gain * math.sin(heading_error) / lookahead_distance
+        heading_gain_eff = 0.0 if in_first_straight else self.heading_gain
+        curvature_heading = -heading_gain_eff * math.sin(heading_error) / lookahead_distance
 
         tang = self._unit_tangent_at_progress(closest_progress)
         closest_xy = self._point_at_progress(closest_progress)
         err = position - closest_xy
         cte_signed = float(tang[0] * err[1] - tang[1] * err[0])
         denom = max(abs(speed) * lookahead_distance + self.cte_softening_m, 1e-3)
-        curvature_cte = (self.cte_gain * cte_signed / denom) if self.cte_gain > 0.0 else 0.0
+        cte_gain_eff = (0.25 * self.cte_gain) if in_first_straight else self.cte_gain
+        curvature_cte = (cte_gain_eff * cte_signed / denom) if cte_gain_eff > 0.0 else 0.0
 
         curvature = float(curvature_geom + curvature_heading + curvature_cte)
         max_curvature_geom = math.tan(self.max_steer) / self.wheelbase
@@ -781,7 +800,7 @@ def generate_main_lane_path(
     field_length: float = DEFAULT_FIELD_LENGTH,
     field_width: float = DEFAULT_FIELD_WIDTH,
     lane_count: int = DEFAULT_MAIN_LANE_COUNT,
-    turn_samples: int = 25,
+    turn_samples: int = 40,
 ) -> list[tuple[float, float]]:
     """Generate a feasible demo path with 2 or 3 main vehicle-center lanes."""
     if field_length <= 0:

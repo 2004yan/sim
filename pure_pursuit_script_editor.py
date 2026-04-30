@@ -81,6 +81,7 @@ SLIP_SPEED_FRACTION = SC.slip_speed_fraction
 VEHICLE_HALF_LENGTH_M = (DEFAULT_WHEELBASE + 2.0 * DEFAULT_WHEEL_RADIUS) / 2.0
 REQUESTED_FIELD_LENGTH = DEFAULT_FIELD_LENGTH
 FIELD_WIDTH = 5.0
+# Must match GroundPlane size from ground_setup.py; else FIELD_LENGTH is clamped short.
 GROUND_SIZE = DEFAULT_GROUND_SIZE
 SEMICIRCLE_COUNT = DEFAULT_SEMICIRCLE_COUNT
 MAIN_LANE_COUNT = DEFAULT_MAIN_LANE_COUNT
@@ -180,6 +181,7 @@ LOCAL_WAYPOINTS = generate_main_lane_path(
     field_length=FIELD_LENGTH,
     field_width=FIELD_WIDTH,
     lane_count=MAIN_LANE_COUNT,
+    turn_samples=48,
 )
 WAYPOINTS = transform_path_to_pose(
     LOCAL_WAYPOINTS,
@@ -193,6 +195,7 @@ tracker = PurePursuitTracker(
     wheelbase=DEFAULT_WHEELBASE,
     track_width=DEFAULT_TRACK_WIDTH,
     wheel_radius=DEFAULT_WHEEL_RADIUS,
+    phase_straight_end_progress=FIRST_STRAIGHT_LEN_M,
     **PP.tracker_kwargs(max_steer=MAX_STEER_RAD, steer_sign=ISAAC_REAR_STEER_SIGN),
 )
 speed_state = {"v_mps": TURN_SPEED_MPS}

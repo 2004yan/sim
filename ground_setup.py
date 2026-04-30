@@ -32,7 +32,7 @@ def create_ground_plane():
     PhysicsContext()
     GroundPlane(
         prim_path=GROUND_PATH,
-        size=20.0,
+        size=40.0,
         color=np.array([0.35, 0.25, 0.10]),
     )
     print(f"[ground] GroundPlane created at {GROUND_PATH}")
