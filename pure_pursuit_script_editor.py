@@ -37,6 +37,7 @@ from pure_pursuit_controller import (
     compute_platform_coverage_start_pose,
     generate_main_lane_path,
     limit_actuator_command,
+    phase_speed_limit_for_progress,
     planar_speed_from_linear_velocity,
     quat_from_yaw,
     speed_from_curvature,
@@ -78,6 +79,7 @@ STALL_CURVATURE = SC.stall_curvature
 STALL_CRAWL_SPEED_MPS = SC.stall_crawl_speed_mps
 STALL_MAX_STEER_RAD = SC.stall_max_steer_rad
 SLIP_SPEED_FRACTION = SC.slip_speed_fraction
+PRE_TURN_SLOWDOWN_M = 5.0
 VEHICLE_HALF_LENGTH_M = (DEFAULT_WHEELBASE + 2.0 * DEFAULT_WHEEL_RADIUS) / 2.0
 # Simple 回字 / U-turn demo: 三段长直道 + 两段 180° 半圆（``generate_main_lane_path``，``lane_count=3``）。
 MAIN_LANE_COUNT = 3
@@ -213,6 +215,13 @@ WORLD_STRAIGHT_CHECK_M = float(
     np.linalg.norm(np.asarray(WAYPOINTS[1], dtype=float)[:2] - np.asarray(WAYPOINTS[0], dtype=float)[:2])
 )
 _STRAIGHT_OK = math.isclose(WORLD_STRAIGHT_CHECK_M, FIELD_LENGTH, rel_tol=0.0, abs_tol=0.05)
+U_TURN_PHASES = [
+    (FIRST_STRAIGHT_LEN_M, FIRST_STRAIGHT_LEN_M + NOMINAL_U_SEMICIRCLE_ARC_M),
+    (
+        FIRST_STRAIGHT_LEN_M + NOMINAL_U_SEMICIRCLE_ARC_M + FIELD_LENGTH,
+        FIRST_STRAIGHT_LEN_M + 2.0 * NOMINAL_U_SEMICIRCLE_ARC_M + FIELD_LENGTH,
+    ),
+]
 tracker = PurePursuitTracker(
     WAYPOINTS,
     wheelbase=DEFAULT_WHEELBASE,
@@ -307,6 +316,14 @@ def pure_pursuit_step(_step_size: float) -> None:
         slowdown_curvature=SLOWDOWN_CURVATURE,
         straight_curvature_deadband=STRAIGHT_CURVATURE_DEADBAND,
     )
+    phase_speed = phase_speed_limit_for_progress(
+        raw_command.closest_progress,
+        u_turn_phases=U_TURN_PHASES,
+        cruise_speed=CRUISE_SPEED_MPS,
+        turn_speed=TURN_SPEED_MPS,
+        pre_turn_slowdown_m=PRE_TURN_SLOWDOWN_M,
+    )
+    target_speed = min(target_speed, phase_speed)
     try:
         v_cmd_rim = ((raw_command.left_rad_s + raw_command.right_rad_s) * 0.5) * DEFAULT_WHEEL_RADIUS
         if v_cmd_rim > 0.06 and pose_state["v_measured"] < SLIP_SPEED_FRACTION * v_cmd_rim:
@@ -375,6 +392,7 @@ print(
     f"  world_first_seg_m={WORLD_STRAIGHT_CHECK_M:.3f}  matches_FIELD_LENGTH={_STRAIGHT_OK}\n"
     f"  first_U_turn: begin steering when path_progress approaches {FIRST_STRAIGHT_LEN_M:.3f}m "
     f"(nominal half-circle arc length ≈ {NOMINAL_U_SEMICIRCLE_ARC_M:.3f}m, polyline slightly longer)\n"
+    f"  speed_plan: start slowing {PRE_TURN_SLOWDOWN_M:.1f}m before each U-turn; hold turn_speed inside U-turn\n"
     "-------------------------------------------------------------------------",
 )
 print(

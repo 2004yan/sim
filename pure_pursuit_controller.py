@@ -1280,6 +1280,40 @@ def speed_from_curvature(
     return float(cruise_speed - (cruise_speed - turn_speed) * ratio)
 
 
+def phase_speed_limit_for_progress(
+    progress: float,
+    *,
+    u_turn_phases: Sequence[tuple[float, float]],
+    cruise_speed: float,
+    turn_speed: float,
+    pre_turn_slowdown_m: float,
+) -> float:
+    """Limit speed by path phase: slow before each U and hold turn speed through it."""
+    if cruise_speed <= 0.0:
+        raise ValueError("cruise_speed must be positive")
+    if turn_speed <= 0.0:
+        raise ValueError("turn_speed must be positive")
+    if turn_speed > cruise_speed:
+        raise ValueError("turn_speed must not exceed cruise_speed")
+    if pre_turn_slowdown_m <= 0.0:
+        raise ValueError("pre_turn_slowdown_m must be positive")
+
+    p = float(progress)
+    limit = float(cruise_speed)
+    for start, end in u_turn_phases:
+        s0 = float(start)
+        s1 = float(end)
+        if s1 < s0:
+            s0, s1 = s1, s0
+        if s0 - pre_turn_slowdown_m <= p < s0:
+            ratio = (p - (s0 - pre_turn_slowdown_m)) / pre_turn_slowdown_m
+            phase_limit = float(cruise_speed + (turn_speed - cruise_speed) * ratio)
+            limit = min(limit, phase_limit)
+        elif s0 <= p <= s1:
+            limit = min(limit, float(turn_speed))
+    return float(limit)
+
+
 def apply_command(bot, command: PurePursuitCommand) -> None:
     """Apply a computed command to PaddyRobotController-like objects."""
     bot.set_wheel_speeds(command.left_rad_s, command.right_rad_s)
@@ -1373,6 +1407,7 @@ __all__ = [
     "generate_main_lane_path",
     "generate_lawnmower_path",
     "limit_actuator_command",
+    "phase_speed_limit_for_progress",
     "planar_speed_from_linear_velocity",
     "planar_yaw_from_pose",
     "quat_from_yaw",
